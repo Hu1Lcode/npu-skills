@@ -1,0 +1,35 @@
+{
+  "skill_name": "npu-model-perf-tuning",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我有个 Qwen-Image-Edit 的推理脚本在 Ascend 910 上跑得很慢，一个 E2E 大概 8 秒，想调优到 2 秒以内。代码目录在 ./qwen-image，启动命令是 python diffusers_infer.py --steps 20。帮我做性能调优。",
+      "expected_output": "走完整 P0-P8：先环境与口径检查、按启动脚本拆调用链与分段打点得到开箱基线(E2E+分段)、加 transfer_to_npu 与 5 个环境变量、采 3~5 步 profiler 定位热点、按单变量循环固化、复测+精度、最后产出符合 §1-§9 的报告。识别 denoise(DiT) 为最重阶段。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "训练方面，我这个 trainer 每步要 1.8s，log 里也是 1.8s/step，batch 32，想提吞吐。启动是 torchrun --nproc_per_node=8 train.py。帮我看瓶颈并把能低侵入改的先优化掉。",
+      "expected_output": "拆 train_step 各子阶段(dataloader/forward/backward/optimizer)打点，区分 host-bound 与计算/通信瓶颈；先上 transfer_to_npu+环境变量(HCCL_BUFFSIZE/TASK_QUEUE_ENABLE/CPU_AFFINITY_CONF 等)；profiler 采3~5步；单变量固化；高侵入改动只列清单交用户决策。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "profiling 出来了，kernel_details.csv 里 AICPU 占了 60%，AICore 才 15%。这说明什么，怎么改？",
+      "expected_output": "判定为 AICPU 主导(算子未落 AI Core)；按 diagnosis-playbook A 类：优先查 float64、未实现算子的 python 逻辑、热点原语换 torch_npu 融合算子(npu_fusion_attention/npu_rms_norm/npu_rotary_mul)、float64→float32；建议用 scan_fusion_ops.py 确认可用性；讲清原因(为何融合算子能降 AICPU)。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "你之前给我写的调优报告里没有 commit hash 和依赖版本，也没有把开箱和最终的对比列出来，重写一下。",
+      "expected_output": "严格按 report-template.md 的 §1-§9 重写：§2 含分支 commit hash 与 torch/torch_npu/CANN/diffusers 等版本；§6 给出开箱 vs 最终对比表；§8 高侵入候选待决策；数字成对且带口径。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "我这模型是多卡的，扩到 8 卡后吞吐几乎不涨，HCCL 占比很高，怎么办？",
+      "expected_output": "判定通信瓶颈(E 类)：HCCL_BUFFSIZE 调大、提升计算通信比(梯度累积/更大 batch)、通算融合(npu_all_gather_base_mm/npu_mm_all_reduce_base)、并行策略评估；强调单变量复测归因，高侵入的并行重构只列清单交用户。",
+      "files": []
+    }
+  ]
+}
