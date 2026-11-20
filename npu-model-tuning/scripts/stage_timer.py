@@ -55,20 +55,6 @@ def _env_enabled():
     return os.environ.get("NPU_TUNE_PROBE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _percentile(values, q):
-    """Simple nearest-rank percentile; q in [0, 100]."""
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = (len(ordered) - 1) * q / 100.0
-    low = int(rank)
-    high = min(low + 1, len(ordered) - 1)
-    fraction = rank - low
-    return ordered[low] * (1 - fraction) + ordered[high] * fraction
-
-
 class StageTimer:
     def __init__(self, enabled=None):
         self.enabled = _env_enabled() if enabled is None else bool(enabled)
@@ -121,15 +107,15 @@ class StageTimer:
         summary = {}
         for name, values in grouped.items():
             total = sum(values)
+            median = statistics.median(values) if values else 0.0
             summary[name] = {
                 "count": len(values),
                 "total_s": total,
                 "mean_s": total / len(values) if values else 0.0,
-                "median_s": statistics.median(values) if values else 0.0,
-                "p50_s": _percentile(values, 50),
-                "p95_s": _percentile(values, 95),
+                "median_s": median,
                 "min_s": min(values) if values else 0.0,
                 "max_s": max(values) if values else 0.0,
+                "jitter_pct": ((max(values) - min(values)) / median * 100.0) if median else 0.0,
                 "share_pct": (total / grand_total * 100.0) if grand_total else 0.0,
             }
         return summary
@@ -137,13 +123,13 @@ class StageTimer:
     def print_table(self):
         summary = self.summary()
         grand_total = sum(item["total_s"] for item in summary.values())
-        print(f"{'stage':<28}{'n':>4}{'median(s)':>12}{'p50(s)':>12}{'p95(s)':>12}{'mean(s)':>12}{'share%':>8}")
+        print(f"{'stage':<28}{'n':>4}{'median(s)':>12}{'jitter%':>10}{'mean(s)':>12}{'share%':>8}")
         for name, item in sorted(summary.items(), key=lambda kv: -kv[1]["total_s"]):
             print(
-                f"{name:<28}{item['count']:>4}{item['median_s']:>12.6f}{item['p50_s']:>12.6f}"
-                f"{item['p95_s']:>12.6f}{item['mean_s']:>12.6f}{item['share_pct']:>8.1f}"
+                f"{name:<28}{item['count']:>4}{item['median_s']:>12.6f}{item['jitter_pct']:>10.1f}"
+                f"{item['mean_s']:>12.6f}{item['share_pct']:>8.1f}"
             )
-        print(f"{'TOTAL':<28}{'':>4}{'':>12}{'':>12}{'':>12}{grand_total:>12.6f}{100.0:>8.1f}")
+        print(f"{'TOTAL':<28}{'':>4}{'':>12}{'':>10}{grand_total:>12.6f}{100.0:>8.1f}")
 
     def dump(self, path):
         """path 以 .json 结尾写 JSON（records + summary），否则写 CSV。"""

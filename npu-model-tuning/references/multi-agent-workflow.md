@@ -92,7 +92,7 @@ agent/
 
 ## 项目目标
 - 模式：<推理 / 训练>
-- 目标指标：<E2E ms / s·step⁻¹ / 吞吐>
+- 目标指标：<推理：E2E ms / DiT 单步 ms；训练：s/step / P50 / P99 / 吞吐>
 - 精度红线：<阈值>
 - 可改动范围：<只允许无侵入（环境变量/融合算子）/ 其他约束 ...>
 
@@ -132,8 +132,10 @@ agent/
 {
   "goal": {"mode": "inference", "metric": "e2e_ms", "target": "<= 800", "precision": "cosine>=0.999"},
   "protocol": {
-    "inference": {"screen": {"warmup": "1 round", "denoise_steps": 5}, "final": {"warmup": "1 round", "denoise_steps": "original"}},
-    "training": {"screen": {"warmup": 20, "steps": 10}, "final": {"warmup": 20, "steps": "original script"}}
+    "baseline_runs": 3,
+    "jitter_threshold_pct": 10,
+    "inference": {"screen": {"warmup": "1 round", "denoise_steps": 5}, "baseline": {"warmup": "1 round", "denoise_steps": "~10", "dit_step_warmup": 5}, "final": {"denoise_steps": "same as baseline"}},
+    "training": {"screen": {"warmup": 20, "steps": 10}, "baseline": {"runs": 3, "log_metrics": "s/step, P50, P99, throughput", "full_run": true}, "final": {"warmup": 20, "steps": "original script"}}
   },
   "model_info": "artifacts/model_info.json",
   "repo": "/path/to/model",
@@ -142,7 +144,7 @@ agent/
   "branch": "npu-tuning/20260101",
   "baseline_commit": "abc1234",
   "phase": "P5a",
-  "current_baseline": {"e2e_ms": 1234.5, "file": "baseline.json", "commit": "abc1234"},
+  "current_baseline": {"metric": "e2e_ms", "median": 1234.5, "jitter_pct": 0.9, "file": "baseline.json", "commit": "abc1234"},
   "tasks": [
     {"id": "001", "owner": "A", "status": "done", "output": "pipeline_breakdown.md"},
     {"id": "002", "owner": "B", "status": "in_progress"},
@@ -182,9 +184,9 @@ agent/
 
 **任务**
 1. 先读 `references/pipeline-analysis.md`、`references/instrumentation.md`，再读 `agent/experience_recall.json` 中的 `code-reading` 经验，带着这些假设追调用链，并在 handoff 里记录哪些经验有用/不适用。然后从启动脚本追到真实执行路径：先定位 pipeline 类/函数及其 `__call__`/`forward`/`train_step`，再找 pipeline 对每个模型组件（text_encoder / DiT / VAE / 条件编码器）的调用点，最后进入模型定义记录类/forward/关键算子位置。产出 `pipeline_breakdown.md`：调用链表 + **模型定义与调用映射表** + Mermaid 图（标注 T1/T2… 打点位置）。
-2. 设计打点方案：扩散模型至少覆盖 `prompt_encode` / `image_encode` / `dit_denoise` / `vae_decode`；训练覆盖 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`。
+2. 设计打点方案：扩散模型至少覆盖 `prompt_encode` / `image_encode` / `dit_denoise` 总时间 / `dit_step` 单步（5 步预热后）/ `vae_decode`；训练覆盖单步内的 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`（若含 text_encoder / VAE / DiT，再按实际模型组件细分）。
 3. 生成 `artifacts/probes.patch`（打点代码只在 patch 里，默认关闭）。
-4. 跑基线与分段计时，产出 `baseline.json`（含 E2E、各阶段中位数/P50/P95/占比、口径）。
+4. 跑基线与分段计时，产出 `baseline.json`：推理独立跑 **3 次任务**（E2E 抖动 ≤ 10%），固定 10 步左右，含 3 轮原始值、E2E 中位数/抖动、各阶段时间/占比、**DiT 单步时间（5 步预热后）/抖动**；训练独立跑 **3 次任务**（日志 `s/step` 抖动 ≤ 10%），**不报 E2E**，P50/P99/吞吐从完整训练任务日志取，另附单步内各阶段时间/占比。用 `scripts/baseline_stats.py` 校验并记录抖动结论。
 5. 写 `agent/handoff_A.md`：关键发现、最重阶段、计时不确定性、模型定义与调用映射的关键条目、文件路径。
 
 **不做**：不提优化建议；除打点外不改模型逻辑。
@@ -224,9 +226,11 @@ agent/
        "command": "bash run.sh ...",
        "protocol": {
          "screen": "P2/P7 筛选口径（推理 warmup 1 轮 / 5-step；训练 warmup 20 / 10-step）",
-         "final": "P2/P7 定稿口径（完整 pipeline / 原始启动脚本）"
+         "baseline": "推理 3 次任务、denoise ~10 步、E2E 抖动≤10%、DiT 单步 5 步预热；训练 3 次完整任务、日志 s/step 抖动≤10%、P50/P99/吞吐取日志",
+         "final": "与基线同一步数的完整 pipeline / 原始启动脚本；训练完整任务"
        },
        "repeats": 3,
+       "jitter_threshold_pct": 10,
        "precision_threshold": {"cosine": 0.999}
      }
    }
@@ -250,29 +254,41 @@ agent/
    - control：当前已固化基线（不含本候选）
    - candidate：应用本候选 patch
    - 顺序可交替（AB/BA）以避免热漂移。
-3. 性能：按 `references/instrumentation.md` 口径——筛选阶段推理 warmup 1 轮、扩散可 5-step；训练 warmup 20 steps、实验测 10 steps。定稿复测必须用完整 pipeline / 原始启动脚本。每次都要记录 **E2E + 全部阶段耗时**（中位数/P50/P95/占比）；训练以日志 s/step 为准。
+3. 性能：按 `references/instrumentation.md` 口径——推理独立跑 3 次任务，固定 10 步左右（筛选可 5-step），报 E2E 中位数/抖动（要求 ≤ 10%）、各阶段时间/占比、**DiT 单步时间（5 步预热后）/抖动**；推理不报 P50/P99/吞吐。训练独立跑 3 次任务，`s/step` 抖动 ≤ 10%，**不报 E2E**；P50/P99/吞吐从完整训练任务日志取，另用打点给出单步内各阶段时间/占比。定稿复测必须用完整 pipeline / 原始启动脚本且与基线同口径。可用 `scripts/baseline_stats.py` 校验 3 轮抖动并留档。
 4. 精度：保存候选输出，用 `compare_outputs.py` 与参考输出对比；主判据统一 `cosine ≥ 0.999`；训练也用固定 batch 前向输出的 cosine 作主判据，loss/grad norm 作为辅助监控。
 5. 产出 `result.json`：
    ```json
    {
      "opt_id": "O2",
+     "mode": "inference",
      "patch": "patches/002-rmsnorm-fusion.patch",
      "commit": "def5678",
      "device": {"chip": "Ascend910", "npu_id": 0, "ascend_rt_visible_devices": "0"},
      "cards_before": "artifacts/tests/O2/cards_before.json",
      "cards_after": "artifacts/tests/O2/cards_after.json",
-     "control": {"e2e_ms_median": 1230.0, "p50": 1228.0, "p95": 1245.0, "throughput": 0.081,
-                 "stages": [{"name": "dit_denoise", "ms_median": 900.0, "ms_p50": 897.5, "ms_p95": 945.0, "share_pct": 72.9}]},
-     "candidate": {"e2e_ms_median": 1180.0, "p50": 1178.0, "p95": 1195.0, "throughput": 0.085,
-                   "stages": [{"name": "dit_denoise", "ms_median": 860.0, "ms_p50": 858.0, "ms_p95": 902.0, "share_pct": 72.0}]},
+     "protocol": {"runs": 3, "denoise_steps": 10, "jitter_threshold_pct": 10, "dit_step_warmup": 5},
+     "control": {
+       "runs": [{"run": 1, "e2e_ms": 1230.0}, {"run": 2, "e2e_ms": 1238.0}, {"run": 3, "e2e_ms": 1229.0}],
+       "e2e_ms_median": 1230.0, "e2e_ms_jitter_pct": 0.7,
+       "dit_step_ms_median": 90.0, "dit_step_jitter_pct": 1.2,
+       "stages": [{"name": "dit_denoise", "ms_median": 900.0, "share_pct": 72.9},
+                  {"name": "dit_step", "ms_median": 90.0, "note": "dit_denoise 子项，不参与占比求和"}]
+     },
+     "candidate": {
+       "runs": [{"run": 1, "e2e_ms": 1180.0}, {"run": 2, "e2e_ms": 1185.0}, {"run": 3, "e2e_ms": 1179.0}],
+       "e2e_ms_median": 1180.0, "e2e_ms_jitter_pct": 0.5,
+       "dit_step_ms_median": 86.2, "dit_step_jitter_pct": 1.0,
+       "stages": [{"name": "dit_denoise", "ms_median": 860.0, "share_pct": 72.0},
+                  {"name": "dit_step", "ms_median": 86.2, "note": "dit_denoise 子项，不参与占比求和"}]
+     },
      "delta_pct": -4.1,
      "precision": {"cosine": 0.99992, "max_abs_diff": 0.003, "mean_abs_diff": 0.0002},
-     "thresholds": {"cosine": 0.999},
+     "thresholds": {"cosine": 0.999, "jitter_pct": 10},
      "pass": true,
-     "notes": "两次 AB/BA 重复一致，波动 < 1%"
+     "notes": "3 轮抖动均 ≤ 1%，同卡同输入"
    }
    ```
-   训练场景：把 `e2e_ms_*` 替换为日志 `s_per_step` / `samples_per_s`，`stages` 使用 `dataloader / forward / backward / optimizer / zero_grad`；精度主判据仍为固定 batch 前向输出的 `cosine ≥ 0.999`，loss/grad norm 辅助记录。
+   训练场景：去掉 `e2e_ms_*`，改为 3 轮日志 `s_per_step`（含 `jitter_pct`）、`p50_s_per_step`、`p99_s_per_step`、`samples_per_s`（均来自完整训练日志），`stages` 使用单步内 `dataloader / forward / backward / optimizer / zero_grad` 的中位数与占比；精度主判据仍为固定 batch 前向输出的 `cosine ≥ 0.999`，loss/grad norm 辅助记录。训练没有 E2E 时间指标。
 6. 写 `agent/handoff_C.md`：测了什么、原始日志路径、异常、是否达标。
 
 **不做**：不改优化代码、不调整阈值、不替 B 判断“是否采纳”；patch 应用失败只报告，不自行修。
@@ -295,12 +311,14 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
 架构师在 `state.json` 里维护卡分配：
 
 ```json
-"cards": {
-  "total": [0, 1, 2, 3, 4, 5, 6, 7],
-  "leases": [
-    {"devices": [0], "owner": "C-O1", "task": "test attention backend", "status": "running"},
-    {"devices": [1], "owner": "C-O2", "task": "test rmsnorm fusion", "status": "pending"}
-  ]
+{
+  "cards": {
+    "total": [0, 1, 2, 3, 4, 5, 6, 7],
+    "leases": [
+      {"devices": [0], "owner": "C-O1", "task": "test attention backend", "status": "running"},
+      {"devices": [1], "owner": "C-O2", "task": "test rmsnorm fusion", "status": "pending"}
+    ]
+  }
 }
 ```
 

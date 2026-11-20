@@ -26,8 +26,8 @@
 
 **融合算子的收益与精度权衡（必须逐点执行）**：融合算子通常都能减少下发/访存并带来正收益，但幅度由热点占比决定；同时可能因 dtype 降级、累加顺序变化或近似激活产生舍入误差。每个融合点必须基于 P1 的模型定义映射定位到具体 `file:line`，按 P7 做输出级精度对比（主判据 `cosine ≥ 0.999`）；不通过时先尝试精度保持变体或只替换非敏感层，仍不通过就回滚。
 
-**侵入性清单排序规则（从高到低，收益统一折算为 E2E 时延或 s/step 的百分比）**：
-1. 优先用 P4 直接证据估算：`热点算子/阶段耗时占比 × 预计可消除比例`（如 attention 占 `dit_denoise` 60%、换后端预计省 20% → E2E 约 8–10%）；
+**侵入性清单排序规则（从高到低，推理折算为 E2E 时延、训练折算为 `s/step`/吞吐的百分比）**：
+1. 优先用 P4 直接证据估算：`热点算子/阶段耗时占比 × 预计可消除比例`（如 attention 占 `dit_denoise` 60%、换后端预计省 20% → 推理 E2E 约 8–10%；训练按 `s/step` 同法折算）；
 2. 其次用经验库/同类模型实测收益（注明来源与适用条件）；
 3. 最后是理论估算（Roofline、FLOPs、通信量），必须标"待验证"。
 
@@ -37,7 +37,7 @@
 
 1. 从**当前固化基线**出发（不是从开箱出发，否则会丢已得收益）。
 2. 只应用一个改动（一个环境变量组 / 一个融合算子替换）。
-3. 用 P2/P7 同口径复测（筛选可用短步：推理 5-step、训练 10-step；定稿必须完整 pipeline / 原始启动脚本；同 warmup/步数/batch/机器状态）；建议重复 ≥ 3 次取中位数，抵消抖动。每次复测必须同时记录 **E2E 与全部阶段耗时**。
+3. 用 P2/P7 同口径复测：推理固定 10 步左右（筛选可用 5-step），独立跑 3 次任务，报 E2E + 各阶段 + DiT 单步（5 步预热后）；训练独立跑 3 次任务，`s/step`/P50/P99/吞吐从完整训练日志取，单步内阶段用打点拆解。基线抖动 > 10% 时先重采，不能拿无效基线做比较。
 4. **增益判定**：相对当前基线提升要显著大于运行间抖动（经验：> 3%–5% 且重复可复现才算数）；同时通过精度校验。
 5. 三态处理：
    - ✅ 有效且精度通过（`cosine ≥ 0.999`）→ **固化**；更新"当前基线"为该结果；git 仓库 `git commit`（`opt(N): <名称>`），非 git 仓库更新 `artifacts/backups/` 与 `changes.log`。
@@ -49,7 +49,7 @@
 - git 仓库：每个已固化优化点一个 commit，消息格式：`opt(01): attention 改用 npu_fused_infer_attention_score`；非 git 仓库见下节"每点备份与回滚"。
 - `artifacts/applied.patch` 可作运行态备份，但正式交付以 P8 的 `patches/NNN-*.patch` + `all.patch` 为准。
 - `artifacts/env.applied.sh`：所有已固化环境变量（可 `source`）。
-- `optimization_ledger.md`：每次实验一行，含 before→after 的 **E2E 时间与各阶段耗时（中位数/P50/P95/占比）**、`standalone_gain`（分卡并行筛选的单点增益）、`stacked_gain`（串行集成后的增量）、`experience_id`（若候选来自经验库）、`experience_result`（该经验在本次是否有效）、原因/证据、精度结论（统一 cosine ≥ 0.999）、状态。最终报告以 `stacked_gain` 为准。
+- `optimization_ledger.md`：每次实验一行，含 before→after 的**推理 E2E 时间 + 各阶段耗时（中位数/占比）+ DiT 单步时间（中位数）**，或训练**日志 `s/step`/P50/P99/吞吐 + 单步内阶段耗时（中位数/占比）**、`standalone_gain`（分卡并行筛选的单点增益）、`stacked_gain`（串行集成后的增量）、`experience_id`（若候选来自经验库）、`experience_result`（该经验在本次是否有效）、原因/证据、精度结论（统一 cosine ≥ 0.999）、状态。最终报告以 `stacked_gain` 为准。
 - `invasive_candidates.md`：所有未实施的侵入性候选，按预期收益降序；每项含优先级、证据、预期收益及依据、侵入程度、改动位置、工作量、风险、依赖、回退方式（模板见 `assets/invasive-candidates-template.md`）。表头：
 
   | 优先级 | 优化点 | P4 证据 | 预期收益（依据） | 侵入程度 | 改动位置 | 工作量 | 风险/副作用 | 依赖 | 回退方式 |
@@ -103,6 +103,7 @@
 - [ ] 所有 `淘汰` 项已回退或开关已关闭；
 - [ ] 互斥组状态自洽；
 - [ ] 可叠加组合已实测；
+- [ ] 基线由 3 次任务采集，推理 E2E / 训练 `s/step` 抖动 ≤ 10%，且 `baseline_stats.json` 有记录；
 - [ ] 精度/功能满足初始口径；
 - [ ] 最终性能与 baseline 同场景、同口径对比（打点关闭）；
 - [ ] 确认无法再派生出仍有潜在收益的新候选。
@@ -131,7 +132,7 @@ while not reached_target:
         write_invasive_decision_list(prof)               # 按预期收益降序，交用户
         break
     apply_one(cand)
-    before, after = remeasure()                          # 同口径, >=3 次中位数
+    before, after = remeasure()                          # 同口径：3 次任务、抖动≤10%；推理10步+DiT单步，训练日志s/step/P50/P99
     if significant(after) and precision_ok():
         freeze(cand); commit_opt(cand); update_baseline(after)
     else:

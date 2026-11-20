@@ -71,6 +71,7 @@ perf_reports/<YYYYMMDD>/
 │   ├── applied.patch            # 运行态备份（可选）
 │   ├── env.applied.sh           # 已固化环境变量（可选，可 source）
 │   ├── probes.patch             # P2 打点补丁（默认关闭，不进入最终 patch）
+│   ├── baseline_stats.json      # P2 三次基线抖动校验结果（可选）
 │   ├── precision/               # P7 精度对比结果（cosine / PSNR / SSIM / 逐层 dump）
 │   ├── tests/                   # 多 Agent 单点测试：<opt_id>/result.json 与原始日志
 │   └── backups/                 # 非 git 仓库：每个优化点的文件级备份与回退清单
@@ -178,7 +179,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 7. 扩散模型默认拆法：
    - `prompt_encode`：tokenizer + `text_encoder` 文本/prompt 编码
    - `image_encode`：VAE encoder / 参考图或源视频编码（如有）
-   - `dit_denoise`：DiT 去噪循环（标注总耗时与单步平均）
+   - `dit_denoise`：DiT 去噪循环（标注总耗时 + DiT 单步时间，单步在 5 步预热后采集）
    - `vae_decode`：VAE 解码
    - 可选：`preprocess`、`postprocess`
 8. 训练模型默认拆法：`dataloader`（含 H2D 拷贝）→ `forward` → `backward` → `optimizer` → `zero_grad`；多卡时标注含 HCCL 的阶段。
@@ -191,11 +192,13 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 2. **每个计时点开始前和结束后都同步**：`torch.cuda.synchronize()`（启用 `transfer_to_npu` 时等价 NPU 同步）；若不可用则用 `torch_npu.npu.synchronize()`。不同步会把"下发耗时"误当成"执行耗时"。
 3. 打点默认关闭：通过独立 `artifacts/probes.patch` 注入，并检查环境变量 `NPU_TUNE_PROBE=1` 才生效。测量阶段按需 `git apply`（非 git 用 `patch -p1`），测完反向还原；最终 `all.patch` 不包含 probes。
 4. **扩散模型至少拆三个大段计时**：prompt 编码与图像编码（两者可各自单独计时）→ DiT 去噪 → VAE decode；如果有额外编码器（音频/视觉条件）再单独加阶段。每段都要有明确的计时边界。
-5. **测量口径分两档**（详见 `references/instrumentation.md`）：
-   - **筛选/实验**：推理 warmup 1 轮，扩散模型可把 denoise steps 降到 5 步；训练 warmup 20 steps、实验测 10 steps 即可。仅用于候选筛选/profiling 定位。
-   - **定稿/上报**：推理 warmup 1 轮后用原始步数端到端跑完整 pipeline；训练 warmup 20 steps 后用原始启动脚本完整训练流程，按日志稳定段统计 `s/step`。
-6. 训练口径：**s/step 与吞吐以日志为准**；分段打点只做少量 step 的指示性拆分，并注明 `synchronize` 会打断异步重叠，不要用分段之和代替吞吐。
-7. 产出 `baseline.json` + 基线表：**必须同时包含 E2E 时间与每一阶段的耗时（中位数/P50/P95/占比）**。这就是后续所有对比的零点；每个优化点的复测结果也要按同样结构记录 E2E + 阶段耗时。
+5. **基线有效性门禁（推理/训练通用）**：基线必须独立跑 **3 次任务**；按 `抖动 = (max - min) / median × 100%` 计算 3 轮差异，要求 **≤ 10%**（可用 `python scripts/baseline_stats.py --baseline perf_reports/<date>/baseline.json` 校验，脚本会同时校验推理 E2E + DiT 单步 / 训练 `s/step`，退出码非 0 即无效）。超限说明机器噪声、抢卡、降频等异常，基线不可用，必须排查后重新采集。推理看 E2E 时间；训练看日志 `s/step`（训练没有 E2E 时间指标）。
+6. **推理基线口径**：采集阶段 `prompt_encode`（text_encoder）、`image_encode`（VAE encoder，如有）、`dit_denoise` 总时间、`vae_decode`；另外必须单独记录 **DiT 单步时间**——去噪是多步迭代，需要既有总时间也有最小单位，单步时间在**预热 5 个 denoise step 后**逐 step 采集，同样要求抖动 ≤ 10%。采集基线时 denoise steps 固定为 **10 步左右**即可（不必跑完整的 40–50 步），基线与后续所有对比必须使用同一步数。
+7. **训练基线口径**：训练**不报 E2E 任务时间**，只有单步时间；时间拆解也在单步内部完成，默认阶段为 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`，若 step 内实际还包含 text_encoder / VAE / DiT 等模型组件，按 P1 的实际调用链继续拆分子阶段。`s/step`、**P50/P99** 和吞吐从**完整训练任务的日志**读取，不需要打点；打点只用于单步内各阶段拆解。
+8. 产出 `baseline.json` + 基线表：
+   - 推理：3 轮 E2E 时间与抖动、各阶段时间/占比、DiT 单步时间/抖动（5 步预热后）；**推理只有时间指标，不报 P50/P99/吞吐**。
+   - 训练：3 轮日志 `s/step` 与抖动、完整训练任务的 P50/P99/吞吐、单步内各阶段时间/占比；不报 E2E。
+   每个优化点的复测结果也要按同样结构记录。
 
 ### P3 Warm-start · 基础接入与环境变量  → 读 `references/warmstart-defaults.md`
 
@@ -230,7 +233,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 
 1. 从**当前固化状态**出发，一次只应用一个优化点（一个环境变量组或一个算子替换）。推理场景优先按 `references/inference-optimization-playbook.md` 的路线图与"症状 → 候选"表选择；训练场景按 `references/training-optimization-playbook.md` 的路线图与并行/显存/通信候选选择。
 2. 每个替换必须可开关、可回退，保留原实现；优先以独立补丁/包装层/monkey patch 落地，尽量不改模型主体结构。先做 `py_compile` / import 校验再测量。
-3. 按 P2/P7 同口径复测性能 + 精度：性能必须同时记录 **E2E 与各阶段耗时**；三态处理：有效且精度通过 → 固化（git commit；非 git 更新备份与 `changes.log`）；无效/负收益/精度回归 → 回滚；冲突 → 待决策。
+3. 按 P2/P7 同口径复测性能 + 精度：推理记录 **E2E + 各阶段 + DiT 单步（5 步预热后）**；训练记录 **日志 `s/step` + P50/P99 + 吞吐 + 单步内阶段拆解**；三态处理：有效且精度通过 → 固化（git commit；非 git 更新备份与 `changes.log`）；无效/负收益/精度回归 → 回滚；冲突 → 待决策。
 4. 回到 P4 重新 profile，继续下一个无侵入项，直到达标或无更多无侵入收益。
 
 **P5b 侵入性改动清单（只列不改，交用户拍板）** —— 无侵入项穷尽后：
@@ -254,7 +257,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 ### P7 复测 + 精度校验  → 读 `references/precision-validation.md`
 
 1. **集成验证（必须）**：把已采纳的优化点按顺序应用到从 `baseline_commit` 新建的集成分支/工作区；每个 patch 先 `git apply --check`，有冲突退回 B 基于当前栈重做 patch。可用 `scripts/verify_stack.py --repo <repo> --base <commit> --patches <dir>` 在临时 worktree 自动验证，并可带 `--command` 跑 smoke/full。**非 git 仓库**：把 `backup_src/` 复制到临时目录，按顺序 `patch -p1` 应用 `patches/NNN-*.patch`，再跑 smoke/full，结果同样记录到 `stack_verify.json`。逐点集成复测：control = 当前栈（首次为原始基线），candidate = 当前栈 + 本优化点，记录 `standalone_gain`（并行筛选值）与 `stacked_gain`（集成增量）。
-2. 所有已固化优化叠加后，按 P2 的**定稿口径**复测最终性能（**打点关闭**，避免同步开销污染数字；推理用完整 pipeline、训练用原始启动脚本完整流程）。同时保留一组**打点开启**的 E2E + 阶段耗时（与基线同口径），用于展示各阶段优化效果；报告主指标用打点关闭数据，阶段对比表注明打点开启。
+2. 所有已固化优化叠加后，按 P2 的**同一基线口径**复测最终性能：推理独立跑 3 次、固定 10 步左右，报 E2E 时间 + 各阶段时间 + DiT 单步时间（5 步预热后），不报 P50/P99；训练从完整训练日志取 `s/step`、P50、P99、吞吐，单步内各阶段耗时另用打点拆解。权威性能数字用**打点关闭**的数据；阶段对比用**打点开启**的数据，并注明口径差异。
 3. 精度校验（每个优化点都要有记录）：
    - 默认：与基线输出做**输出级对比**——主判据统一为 `cosine ≥ 0.999`；同时记录 `max_abs_diff`、`mean_abs_diff`、相对 L2 用于定位差异来源（不作为第二门槛）；图像/视频另算 PSNR/SSIM 并保存关键帧对照。
    - 若 `cosine < 0.999` 或肉眼可见差异：用 forward hook 做**逐层 dump 对比**，定位首个异常层。
@@ -272,7 +275,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
    3. 调优前基线
    4. 阶段打点耗时
    5. 调用链分析（pipeline 定义 → 各模型定义/调用映射 + Mermaid 流程图，标注打点位置）
-   6. 优化点逐一说明（现象 / 为什么做 / 改动 / 性能收益（E2E + 各阶段耗时）/ 精度影响 / 风险与回退）
+   6. 优化点逐一说明（现象 / 为什么做 / 改动 / 性能收益（推理 E2E + 各阶段 + DiT 单步；训练 s/step + P50/P99 + 吞吐 + 单步内阶段）/ 精度影响 / 风险与回退）
    7. 优化后性能
    8. 优化后 vs 基线对比
 3. **经验沉淀（默认必做）**：从 `optimization_ledger.md` 和最终报告提取新经验，用 `scripts/experience.py add` 写入对应类别；本次复用过的经验用 `experience.py update --result success|failed` 回写结果。只写有实测证据、可复用、已脱敏的条目。
@@ -283,6 +286,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 
 - [ ] `perf_reports/<date>/` 下 `final_report.md`、`patches/`、`baseline.json`、`prof/`、`profiling_analysis.md`、`optimization_ledger.md`、`invasive_candidates.md`、`artifacts/env_info.json`、`artifacts/model_info.json`、`artifacts/fusion_ops.json` 齐全
 - [ ] 报告严格按 8 节顺序，所有性能数字都有基线 vs 优化后的成对数据与口径
+- [ ] `baseline.json` 含 3 次任务原始值，推理 E2E / 训练日志 `s/step` 抖动 ≤ 10%（见 `artifacts/baseline_stats.json`）
 - [ ] 非 git 仓库：`backup_src/`、`artifacts/backups/`、`artifacts/changes.log` 齐全，每个优化点都能单独回退
 - [ ] 每个优化点有独立 patch、独立性能收益、独立精度结论
 - [ ] 侵入性优化清单已按预期收益降序排列，未实施项明确标注"待用户决策"
@@ -294,7 +298,9 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 ## 关键原则
 
 - **先测量，后改动**：任何优化前必须有基线和 profiling 证据。
-- **基线两层**：整体 E2E / s·step⁻¹ + 各阶段耗时，缺一不可。
+- **基线三次有效**：推理/训练都独立跑 3 次任务，推理看 E2E 时间、训练看日志 `s/step`，抖动 ≤ 10% 才算有效基线；超限必须重采。
+- **推理基线**：E2E 时间 + 各阶段耗时 + **DiT 单步时间（5 步预热后）**；denoise steps 固定 10 步左右，且只有时间指标，不报 P50/P99/吞吐。
+- **训练基线**：只有单步时间，不报 E2E；阶段拆解在单步内完成；P50/P99/吞吐从完整训练日志读取，不用打点。
 - **计时必同步**：每个打点前后都要 `synchronize()`，否则测到的是下发时间。
 - **收益成对对比**：基线必须当轮同卡重测；不拿历史数据当分母。
 - **卡必须干净**：测试前用 `scripts/check_cards.py` 确认目标卡无其他进程；不能只看 HBM（空闲也可能有预留）。

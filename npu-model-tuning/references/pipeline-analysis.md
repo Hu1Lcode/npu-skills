@@ -42,7 +42,7 @@
 |---|--------|----------------|----------------|-------------|----------|----------|
 | 1 | prompt_encode | text_encoder + tokenizer | `pipeline.py:120` | prompt → embeds | T1: `pipeline.py:118`, T2: `pipeline.py:125` | 低 |
 | 2 | image_encode | VAE encoder | `pipeline.py:130` | 参考图 → latent | T3/T4 | 中 |
-| 3 | dit_denoise | DiT transformer | `pipeline.py:180` | latent → latent | T5/T6（含循环内单步 T5a/T6a） | 高 |
+| 3 | dit_denoise | DiT transformer | `pipeline.py:180` | latent → latent | T5/T6（总时间）；T5a/T6a（前 5 步预热后的 DiT 单步） | 高 |
 | 4 | vae_decode | VAE decoder | `pipeline.py:240` | latent → 输出 | T7/T8 | 中 |
 
 ### 2. 模型定义与调用映射表（必须）
@@ -91,7 +91,7 @@ flowchart TD
 |---|---|---|
 | `prompt_encode` | tokenizer + text_encoder | prompt / 文本编码，通常每次请求执行一次 |
 | `image_encode` | VAE encoder（参考图/源视频编码） | 图像编辑、图生视频、视频编辑场景有；纯文生图可能没有 |
-| `dit_denoise` | DiT transformer × `num_inference_steps` | 去噪循环，通常是最重阶段；需记录总耗时和单步平均 |
+| `dit_denoise` | DiT transformer × `num_inference_steps` | 去噪循环，通常是最重阶段；需记录总耗时和 DiT 单步时间（5 步预热后逐 step 采集） |
 | `vae_decode` | VAE decoder | latent → 最终图像/视频帧 |
 
 如果模型有额外的音频编码器、视觉编码器（如 VLM 条件编码）、文本/图像交叉注意力预处理，也作为独立阶段列出，不要混进 `prompt_encode`。

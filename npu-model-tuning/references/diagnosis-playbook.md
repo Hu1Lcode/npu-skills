@@ -28,7 +28,7 @@
 - **案例**：OpenWAM AICPU ~73.3% → 换融合算子 + float64→float32 后 step 15.79→3.02 s/step。
 
 ### B. 首步/首次推理特别慢
-- **证据**：第 1 步远慢于后续；E2E 被首步拉高。
+- **证据**：第 1 步远慢于后续；推理 E2E 或训练 `s/step` 被首步拉高。
 - **原因**：编译、内存池分配、算子首次加载（aclnn init）、图构建。
 - **修复**：warmup 后再计时；开启算子编译缓存（`ASCEND_OPP_CACHE`）；`MULTI_STREAM_MEMORY_REUSE=2`；必要时预热一次完整 pipeline。
 

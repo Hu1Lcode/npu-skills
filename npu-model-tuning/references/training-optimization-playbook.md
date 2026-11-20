@@ -31,10 +31,13 @@
 
 ## 2. 训练链路与基线口径
 
-- 阶段拆分：`dataloader`（含预处理与 H2D）→ `forward`（含 loss）→ `backward` → `optimizer.step()` → `zero_grad()`；多卡时标注 HCCL 所在的阶段。
-- **权威指标是日志**：训练框架通常打印 `s/step` 或 `iter_time`；吞吐 = `global_batch_size / s_per_step`。分段打点只做少量 step 的指示性拆分，不能把分段之和当作吞吐。
-- 口径：**warmup 20 steps**；筛选/实验测 **10 steps**；定稿/上报必须用原始启动脚本完整流程，按日志稳定段统计 `s/step`。固定数据、seed、batch、梯度累积和卡数。
-- 每个实验记录：E2E `s/step`、吞吐、显存峰值，以及各阶段耗时（中位数/P50/P95/占比）；每次复测都按同一结构记录。
+- **训练没有 E2E 任务时间指标，只有单步时间**；所有时间拆解都在单步内部完成。
+- 阶段拆分：`dataloader`（含预处理与 H2D）→ `forward`（含 loss）→ `backward` → `optimizer.step()` → `zero_grad()`；多卡时标注 HCCL 所在的阶段。若 step 内实际还包含 text_encoder / VAE / DiT 等模型组件，按 P1 的实际调用链继续拆分子阶段（与推理一样要能看到具体组件，而不是只有一个 `forward` 总数）。
+- **权威指标是日志**：训练框架通常打印 `s/step`、`iter_time`、P50/P99 和吞吐；吞吐 = `global_batch_size / s_per_step`。分段打点只做少量 step 的指示性拆分，不能把分段之和当作 `s/step` 或吞吐。
+- 基线必须独立跑 **3 次任务**，用日志 `s/step` 计算抖动 `(max-min)/median`，要求 **≤ 10%**，否则重采。
+- **P50/P99 必须来自完整训练任务日志**，不能用少量 step 的打点数据计算；打点只用于 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad` 的单步内占比拆解。
+- 口径：**warmup 20 steps**；筛选/实验测 **10 steps**；定稿/上报用原始启动脚本完整流程，按日志稳定段统计 `s/step`、P50、P99、吞吐。固定数据、seed、batch、梯度累积和卡数。
+- 每个实验记录：日志 `s/step`（3 轮中位数与抖动）、P50、P99、吞吐、显存峰值，以及单步内各阶段耗时（中位数/占比）。
 
 ## 3. 数据加载与 Host 侧
 
@@ -67,7 +70,7 @@
 - BF16/FP16 混合精度（先确认模型数值稳定性）；优化器状态分片/ZeRO；激活重算（gradient checkpointing）以时间换显存。
 - `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` 缓解碎片；`MULTI_STREAM_MEMORY_REUSE` 视版本支持。
 - 减小 micro-batch、增大梯度累积；检查是否有未释放的缓存/中间张量常驻。
-- 显存优化后必须重新测 step time；重计算可能让计算变慢，收益要用端到端 `s/step` 判断。
+- 显存优化后必须重新测 step time；重计算可能让计算变慢，收益要用日志 `s/step` 判断。
 
 ## 6. 计算与融合算子
 
@@ -100,7 +103,7 @@
 
 ## 10. 候选排序与上报
 
-- 排序统一折算为 E2E `s/step` 或吞吐的百分比：优先 P4 直接证据（热点阶段/算子占比 × 预计消除比例），其次经验库/同类模型实测，最后理论估算并标“待验证”。
+- 排序统一折算为 `s/step` 或吞吐的百分比（训练没有 E2E 任务时间指标）：优先 P4 直接证据（热点阶段/算子占比 × 预计消除比例），其次经验库/同类模型实测，最后理论估算并标“待验证”。
 - 收益接近时，侵入低、工作量小、依赖少的排前面。
 - 每项写清：优先级、优化点、P4 证据、预期收益及依据、侵入程度、改动位置 `file:line`、工作量、风险/副作用、依赖、回退方式；模板见 `assets/invasive-candidates-template.md`。
 - 只有用户批准后才实施侵入性训练改动；无侵入项（环境变量组、融合算子）仍按 P5a 逐点测量并固化。
