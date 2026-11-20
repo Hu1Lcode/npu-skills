@@ -181,11 +181,11 @@ agent/
 **输入**：仓库、启动脚本、目标口径、精度约束、允许修改打点的范围。
 
 **任务**
-1. 先读 `references/pipeline-analysis.md`、`references/instrumentation.md`，再读 `agent/experience_recall.json` 中的 `code-reading` 经验，带着这些假设追调用链，并在 handoff 里记录哪些经验有用/不适用。然后从启动脚本追到真实执行路径，产出 `pipeline_breakdown.md`：调用链表 + Mermaid 图（标注 T1/T2… 打点位置）。
+1. 先读 `references/pipeline-analysis.md`、`references/instrumentation.md`，再读 `agent/experience_recall.json` 中的 `code-reading` 经验，带着这些假设追调用链，并在 handoff 里记录哪些经验有用/不适用。然后从启动脚本追到真实执行路径：先定位 pipeline 类/函数及其 `__call__`/`forward`/`train_step`，再找 pipeline 对每个模型组件（text_encoder / DiT / VAE / 条件编码器）的调用点，最后进入模型定义记录类/forward/关键算子位置。产出 `pipeline_breakdown.md`：调用链表 + **模型定义与调用映射表** + Mermaid 图（标注 T1/T2… 打点位置）。
 2. 设计打点方案：扩散模型至少覆盖 `prompt_encode` / `image_encode` / `dit_denoise` / `vae_decode`；训练覆盖 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`。
 3. 生成 `artifacts/probes.patch`（打点代码只在 patch 里，默认关闭）。
 4. 跑基线与分段计时，产出 `baseline.json`（含 E2E、各阶段中位数/P50/P95/占比、口径）。
-5. 写 `agent/handoff_A.md`：关键发现、最重阶段、计时不确定性、文件路径。
+5. 写 `agent/handoff_A.md`：关键发现、最重阶段、计时不确定性、模型定义与调用映射的关键条目、文件路径。
 
 **不做**：不提优化建议；除打点外不改模型逻辑。
 
@@ -198,7 +198,7 @@ agent/
 2. P4 采集并分析 profiling：按 `references/profiling-recipes.md` 采集（**默认只采主 rank，全 rank 需用户确认**；扩散 profiling 可用 5 步），按 `references/profiling-analysis.md` 做 step_trace 分型、算子透视、Roofline 与慢卡判断，写 `profiling_analysis.md`。
 3. P3 评估基础无侵入手段：按 `references/warmstart-defaults.md` 检查 `torch_npu` 接入与候选环境变量，作为一个优化点成组提出。
 4. P5 形成候选清单 `optimization_candidates.json`，分两组（推理场景优先查 `references/inference-optimization-playbook.md` 的路线图与"症状 → 候选"表；训练场景查 `references/training-optimization-playbook.md`）：
-   - `non_invasive`：**只允许环境变量组与融合算子替换**。融合算子必须先跑 `python scripts/scan_fusion_ops.py --detail --json <repo>/perf_reports/<date>/artifacts/fusion_ops.json`，只列本机实际存在的接口，并参考签名/说明确认参数；
+   - `non_invasive`：**只允许环境变量组与融合算子替换**。融合算子必须先跑 `python scripts/scan_fusion_ops.py --detail --json <repo>/perf_reports/<date>/artifacts/fusion_ops.json`，只列本机实际存在的接口，并从 A 的 `pipeline_breakdown.md` 模型定义映射定位到具体 `file:line`，参考签名/说明确认参数，按 `fusion-op-catalog.md` 的收益/精度规则筛选；
    - `invasive_pending_decision`：其余全部改动，**按预期性能收益从高到低排序**（依据优先级：P4 热点占比 × 预计消除比例 > 经验库实测 > 理论估算）。
 
    每项包含（来自经验的要写 `experience_id`）：

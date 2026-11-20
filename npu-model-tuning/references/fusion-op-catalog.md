@@ -2,6 +2,30 @@
 
 来源参考：torch_npu 接口文档与目标机实际导出。**先用 `scripts/scan_fusion_ops.py --detail` 确认当前版本真正存在哪些接口，并查看函数签名与首行说明**——不同 torch_npu / CANN 版本有增删，目录里的接口不能照抄。
 
+## 收益与精度的基本判断（先读）
+
+融合算子通常能减少 kernel 下发、中间 Tensor 和访存，所以**一般会有性能收益，但收益大小取决于它覆盖的热点占比和原实现能消除的比例**，必须用同轮成对测量确认；不要因为"融合一定更快"就全量替换。
+
+融合算子也可能引入**舍入误差**：常见来源是输入被降为 fp16/bf16、归一化方差在低精度下计算、累加顺序改变、激活函数使用近似实现（如 fast_gelu）。扩散模型的去噪循环会逐步累积误差，VAE decode 和长视频/高分辨率场景对误差尤其敏感。
+
+**决策规则（每个融合算子都要执行）**：
+
+1. 先按 P4 证据估算收益：`该算子/子链路耗时占比 × 预计消除比例`。融合算子通常都有收益，但幅度多与少不同；单点收益小于测量噪声时（经验上达不到 3%–5% 的 E2E 改善）不作为优先项，若多个小融合作用于同一热点链路，可作为一组评估。
+2. 在 P1 的模型定义映射中定位具体实现 `file:line`，一次只替换一个算子/一处实现，保留原实现和开关。
+3. 固定输入/seed 做输出级对比，主判据 `cosine ≥ 0.999`；同时记录 `max_abs_diff`、`rel_l2`、PSNR/SSIM 用于定位。
+4. 精度不通过时按顺序尝试：保持 fp32 方差/累加的精度保持变体 → 只替换非敏感层或非敏感阶段 → 更换融合实现；仍不通过就回滚，**不能为了性能默认保留**。若收益显著但精度始终不达标，把证据（性能收益 + 误差数值）记录到优化台账/决策清单交用户判断，不自动启用。
+5. 每个融合点都记录：现象、预期收益及依据、实测 E2E + 各阶段耗时、cosine/误差、最终采用或回滚结论。
+
+## 常见融合算子的精度风险
+
+| 融合算子 | 常见收益 | 主要精度风险 | 处理建议 |
+|---|---|---|---|
+| `npu_rms_norm` / `npu_add_rms_norm` | 合并 Cast/Norm/Add，减少小 kernel | fp16/bf16 输入下方差精度下降，误差逐层累积 | 关键层保持 fp32 方差；先用非敏感层验证；逐层 dump 对比 |
+| `npu_add_layer_norm` | 合并残差 Add + LayerNorm + modulation | affine/modulation 的 dtype/广播语义变化 | 核对 gamma/beta 形状与 dtype；输出级 + 首层 dump |
+| `npu_rotary_mul` / `npu_apply_rotary_pos_emb` | 去掉 transpose/复数运算 | float64→float32 精度损失；`rotary_mode` 配对错误 | 校验 interleave/half 模式与 cos/sin dtype；错误不报错但结果错 |
+| `npu_swiglu` / `npu_fast_gelu` | 融合激活/FFN，减少访存 | 近似激活函数误差 | 与原始激活逐元素对比；图像/视频指标 + cosine |
+| `npu_fusion_attention` / `npu_fused_infer_attention_score` | 融合 QKV/softmax/输出，显著减少显存与下发 | softmax scale/mask 语义、BF16 QKV 限制、累加顺序 | 固定 shape 对比 logits/输出；必要时逐层 dump attention 输出 |
+
 ## 按族分类（常见）
 
 | 族 | 代表接口 |

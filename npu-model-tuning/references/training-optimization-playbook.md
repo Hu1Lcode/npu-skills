@@ -71,7 +71,8 @@
 
 ## 6. 计算与融合算子
 
-- 先按 P4 找 AICPU / 小 kernel / memcpy 热点，再替换 `torch_npu` 融合算子：RMSNorm、RoPE、SwiGLU/FFN、Attention、Add+Norm；一次只换一个并做精度对比。
+- 先按 P4 找 AICPU / 小 kernel / memcpy 热点，再通过 P1 的模型定义映射定位到模型实现的具体 `file:line`，替换 `torch_npu` 融合算子：RMSNorm、RoPE、SwiGLU/FFN、Attention、Add+Norm；一次只换一个并做精度对比。
+- 融合算子通常能减少下发/访存并带来正收益，但收益大小由热点占比决定；可能因 fp16/bf16 输入、累加顺序或近似激活产生舍入误差。训练中以固定 batch 前向输出 `cosine ≥ 0.999` 为主判据，loss / gradient norm 辅助监控；不通过先尝试精度保持变体或只替换非敏感层，仍不通过就回滚。
 - Attention 训练优先 `npu_fusion_attention`（按 dtype/layout/mask 选 v2/v3）；推理后端不直接套到训练。
 - 通算融合：`npu_all_gather_base_mm`、`npu_mm_all_reduce_base`、`npu_mm_reduce_scatter_base`，需确认并行策略与 shape 匹配。
 - 融合算子替换属于无侵入自动项；需要改模型结构/接口的归入 P5b。

@@ -77,7 +77,7 @@ perf_reports/<YYYYMMDD>/
 ├── backup_src/                  # 非 git 仓库：P0 完整代码备份（最终兜底）
 ├── prof/                        # torch_npu.profiler 产物（必须持久化）
 ├── profiling_analysis.md        # P4 profiling 分析结论与候选方向
-├── pipeline_breakdown.md        # P1 调用链与打点位置说明
+├── pipeline_breakdown.md        # P1 调用链、模型定义映射与打点位置说明
 ├── baseline.json                # P2 基线数据
 ├── optimization_ledger.md       # 每个优化点的实验台账
 ├── invasive_candidates.md       # 侵入性优化候选清单（按预期收益降序，待用户决策）
@@ -170,16 +170,20 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 ### P1 静态分析 · 调用链拆解  → 读 `references/pipeline-analysis.md`
 
 1. 读启动脚本：环境变量、`python -m` / `torchrun` 入口、参数、真正执行的 Python 文件。
-2. 从入口顺调用链：入口 → 模型/流水线构造 → 数据加载/预处理 → 前向 / 训练循环 → 后处理 / 保存。
-3. 判定推理还是训练，切分可观测阶段，记录每阶段的 `file:line`、输入输出、使用的模型/模块。
-4. 产出一张 **Mermaid 流程图**，并在图中标注**计划插入计时打点的位置**（`T1`、`T2`…）。同时输出表格到 `pipeline_breakdown.md`。
-5. 扩散模型默认拆法：
+2. **先找到 pipeline**：推理通常是 `DiffusionPipeline` / `WanPipeline` / 自研 pipeline 的 `__call__` / `forward` / `generate`；训练是训练循环里的 `train_step` 或完整 step 函数。记录 pipeline 的类/函数名、定义位置 `file:line`、启动脚本中的调用点。
+3. **再找 pipeline 对每个模型的调用**：按执行顺序列出 `text_encoder` / `image_encoder` / `DiT` / `VAE` / 条件编码器等；每个组件记录构造/加载点（`from_pretrained` / `build_model` / `load_checkpoint`）和 pipeline 内的调用点 `file:line`。
+4. **进入模型定义定位算子**：对每个模型组件记录模型类/函数定义 `file:line`、forward 入口 `file:line`，并继续向内定位融合算子替换涉及的关键实现：Attention、RMSNorm/LayerNorm、RoPE、FFN/激活、Add+Norm、VAE 卷积/逐元素等。模型来自外部包无法读源码时，记录包名/版本与 `external:<package>`，不能编造 `file:line`。
+5. 判定推理还是训练，切分可观测阶段，记录每阶段的 `file:line`、输入输出、使用的模型/模块。
+6. 产出 **Mermaid 流程图**并标注**计划插入计时打点的位置**（`T1`、`T2`…），同时输出到 `pipeline_breakdown.md`；其中必须包含 **模型定义与调用映射表**（组件 → 模型类 → 定义 file:line → 构造点 → pipeline 调用点 → forward 入口 → 关键算子/融合候选）。
+7. 扩散模型默认拆法：
    - `prompt_encode`：tokenizer + `text_encoder` 文本/prompt 编码
    - `image_encode`：VAE encoder / 参考图或源视频编码（如有）
    - `dit_denoise`：DiT 去噪循环（标注总耗时与单步平均）
    - `vae_decode`：VAE 解码
    - 可选：`preprocess`、`postprocess`
-6. 训练模型默认拆法：`dataloader`（含 H2D 拷贝）→ `forward` → `backward` → `optimizer` → `zero_grad`；多卡时标注含 HCCL 的阶段。
+8. 训练模型默认拆法：`dataloader`（含 H2D 拷贝）→ `forward` → `backward` → `optimizer` → `zero_grad`；多卡时标注含 HCCL 的阶段。
+
+**为什么必须找到模型定义**：融合算子替换发生在模型实现内部（Attention / Norm / RoPE / FFN / VAE 等），P1 不定位到模型类和 forward，P5 就无法把 profiling 热点映射成可执行的替换点，也无法判断舍入误差会影响哪些层和哪个阶段。
 
 ### P2 分段打点基线  → 读 `references/instrumentation.md`
 
@@ -197,9 +201,9 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 
 1. **O1 · torch_npu 接入检查**：若入口尚未导入 `torch_npu` / `transfer_to_npu`，在入口最前面补上（基础接入）。已接入则跳过并记录。
 2. **O2 · 环境变量组**：按场景从 `assets/env.default.sh` 的候选集中选择相关变量，作为一个优化点成组应用、成组测量。不要无脑全开；逐项确认当前 CANN/torch_npu 版本支持。
-3. 运行 `python scripts/scan_fusion_ops.py --detail --json perf_reports/<date>/artifacts/fusion_ops.json`，建立当前机器实际可用的 `npu_*` 算子清单（含 torch_npu 版本、分组、函数签名与首行说明），供 P4/P5 使用。
+3. 运行 `python scripts/scan_fusion_ops.py --detail --json perf_reports/<date>/artifacts/fusion_ops.json`，建立当前机器实际可用的 `npu_*` 算子清单（含 torch_npu 版本、分组、函数签名与首行说明），供 P4/P5 使用。扫描结果只是候选池，不直接全量替换。
 4. 应用后先按 P2 同口径复测一次，记录本组的性能收益（作为一个优化点）。
-5. **融合算子替换不在 P3 盲目执行**：必须等 P4 profiling 定位到热点后再逐个替换、逐个测量。
+5. **融合算子替换不在 P3 盲目执行**：必须等 P4 profiling 定位到热点、并基于 P1 的模型定义映射找到对应 `file:line` 后，再逐个替换、逐个测量性能和精度。融合算子通常能减少下发和访存，但收益大小取决于热点占比；同时可能因 dtype 降级、累加顺序或近似激活引入舍入误差，精度不通过时先尝试精度保持变体，仍不通过就回滚，不能默认全量启用。
 
 ### P4 采集 Profiling + 分析  → 读 `references/profiling-recipes.md`、`references/profiling-analysis.md`
 
@@ -222,7 +226,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 **P5a 无侵入优化（自动实施、逐点固化）** —— 只做两类：
 
 - **环境变量组**：P3 基础组 + 按 profiling 证据追加的组，成组应用、成组测量；
-- **融合算子 / 算子后端替换**：先 `python scripts/scan_fusion_ops.py --detail --json perf_reports/<date>/artifacts/fusion_ops.json` 扫描本机 `torch_npu` 实际导出接口（含签名/说明；不同版本有增删，不能照抄目录），再对照 `references/fusion-op-catalog.md` 和 P4 热点逐个替换；mindiesd 等框架自带的融合接口、attention backend 切换同属此类。
+- **融合算子 / 算子后端替换**：先 `python scripts/scan_fusion_ops.py --detail --json perf_reports/<date>/artifacts/fusion_ops.json` 扫描本机 `torch_npu` 实际导出接口（含签名/说明；不同版本有增删，不能照抄目录），再对照 `references/fusion-op-catalog.md`、P4 热点和 P1 的模型定义映射（定位到具体 `file:line`）逐个替换；mindiesd 等框架自带的融合接口、attention backend 切换同属此类。融合算子一般能减少下发/访存，但收益取决于热点占比；可能引入舍入误差（fp16/bf16 输入、累加顺序、近似激活），必须逐个测性能 + 精度，不能默认全量启用。
 
 1. 从**当前固化状态**出发，一次只应用一个优化点（一个环境变量组或一个算子替换）。推理场景优先按 `references/inference-optimization-playbook.md` 的路线图与"症状 → 候选"表选择；训练场景按 `references/training-optimization-playbook.md` 的路线图与并行/显存/通信候选选择。
 2. 每个替换必须可开关、可回退，保留原实现；优先以独立补丁/包装层/monkey patch 落地，尽量不改模型主体结构。先做 `py_compile` / import 校验再测量。
@@ -267,12 +271,12 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
    2. 模型信息
    3. 调优前基线
    4. 阶段打点耗时
-   5. 调用链分析（Mermaid 流程图，标注打点位置）
+   5. 调用链分析（pipeline 定义 → 各模型定义/调用映射 + Mermaid 流程图，标注打点位置）
    6. 优化点逐一说明（现象 / 为什么做 / 改动 / 性能收益（E2E + 各阶段耗时）/ 精度影响 / 风险与回退）
    7. 优化后性能
    8. 优化后 vs 基线对比
 3. **经验沉淀（默认必做）**：从 `optimization_ledger.md` 和最终报告提取新经验，用 `scripts/experience.py add` 写入对应类别；本次复用过的经验用 `experience.py update --result success|failed` 回写结果。只写有实测证据、可复用、已脱敏的条目。
-4. 附产物索引：patch 路径、prof 路径、profiling_analysis.md、baseline.json、artifacts/env_info.json、artifacts/model_info.json、optimization_ledger.md、invasive_candidates.md、复现命令。
+4. 附产物索引：patch 路径、prof 路径、profiling_analysis.md、baseline.json、artifacts/env_info.json、artifacts/model_info.json、artifacts/fusion_ops.json、optimization_ledger.md、invasive_candidates.md、复现命令。
 5. 说明分支位置 / 备份位置，以及如何回退所有改动。
 
 ## 交付前自检
@@ -284,6 +288,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 - [ ] 侵入性优化清单已按预期收益降序排列，未实施项明确标注"待用户决策"
 - [ ] `all.patch` 不含 `StageTimer` / `NPU_TUNE_PROBE` / 打点代码
 - [ ] `pipeline_breakdown.md` 的 Mermaid 图标注了 T1/T2… 打点位置
+- [ ] `pipeline_breakdown.md` 含**模型定义与调用映射表**，融合算子/侵入性候选能回指到模型实现的 `file:line`
 - [ ] 复现命令、分支/备份位置、回退方式已写明
 
 ## 关键原则
@@ -296,6 +301,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 - **并行只筛选，集成才定稿**：分卡并行只用于候选筛选；最终数字必须来自串行集成后的全栈复测。
 - **逐点归因**：每个优化点单独测量、单独记录性能收益和精度影响；环境变量组作为一组，融合算子逐个。
 - **无侵入优先**：只自动做环境变量与融合算子两类；其余改动只列清单，按预期收益从高到低交用户决策。
+- **融合算子不是默认全开**：通常有收益但幅度取决于热点占比，且可能引入舍入误差；必须基于 P1 模型定义定位到 `file:line`，逐点测量性能与精度，精度不通过先尝试精度保持变体、仍不通过即回滚。
 - **精度是硬门**：任何优化都要通过精度校验，回归即回滚。
 - **预期不写成结果**：没实测的收益只能写"预期/待验证"。
 - **失败也记录**：负收益、回滚的实验同样进台账，避免重复踩坑。
@@ -305,10 +311,10 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 
 | 文件 | 何时读 |
 |---|---|
-| `references/pipeline-analysis.md` | P1 调用链拆解、Mermaid 模板、扩散模型拆解示例 |
+| `references/pipeline-analysis.md` | P1 调用链拆解、模型定义与调用映射、Mermaid 模板、扩散模型拆解示例 |
 | `references/instrumentation.md` | P2 打点规范、sync 语义、扩散/训练拆解与统计口径 |
 | `references/warmstart-defaults.md` | P3 torch_npu 接入、环境变量候选集 |
-| `references/fusion-op-catalog.md` | P3 扫描 / P5 选择融合算子 |
+| `references/fusion-op-catalog.md` | P3 扫描 / P5 选择融合算子、收益与精度权衡决策 |
 | `references/profiling-recipes.md` | P4 采集规范：profiler 配置、脚本注入方式、产物验证、npu-smi |
 | `references/profiling-analysis.md` | P4 深度分析：step_trace 分型、算子透视、Roofline、Hostbound、慢卡、训练 profiling/MFU |
 | `references/diagnosis-playbook.md` | P4/P5 瓶颈证据 → 优化方向 |

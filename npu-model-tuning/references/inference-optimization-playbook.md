@@ -80,7 +80,7 @@ torch_npu.npu_fused_infer_attention_score(q, k, v, num_heads=..., input_layout="
 
 ## 3. 融合算子替换（Attention 子链路优先）
 
-按 P4 定位到的热点逐个替换，不要整网盲改。核心替换：
+按 P4 定位到的热点逐个替换，不要整网盲改。融合算子通常有性能收益，但幅度取决于热点占比；同时可能因 fp16/bf16 输入、累加顺序或近似激活引入舍入误差。先通过 P1 的模型定义映射定位到模型内部的具体 `file:line`，一次只换一个，并按 `fusion-op-catalog.md` 的收益/精度决策流程确认是否保留。核心替换：
 
 | 原实现 | Ascend 替换 | 关键点 |
 |---|---|---|

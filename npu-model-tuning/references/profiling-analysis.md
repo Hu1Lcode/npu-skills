@@ -54,7 +54,7 @@ Free%          = Σ Free                          / Σ 总时间
 
 - 优先读 `op_statistics.csv`：按 `OP Type` + `Ratio(%)` 排序取前 3–5 个。
 - 没有 op_statistics 时读 `op_summary.csv` 的 `OP Type` / `Task Duration(us)`，或 `kernel_details.csv` 的 `Type` / `Duration(us)` 聚合。
-- 把 Top-N 算子与 P2 的分段（text_encoder / DiT denoise / VAE decode）对上，确认热点归属。
+- 把 Top-N 算子与 P2 的分段（text_encoder / DiT denoise / VAE decode）对上，确认热点归属；再通过 P1 的模型定义与调用映射回查到具体模型类/forward 和算子实现 `file:line`，作为 P5 融合算子替换候选的输入。
 
 ### 3.2 看指令占比透视表（判断"算什么、卡在哪"）
 

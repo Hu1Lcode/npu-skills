@@ -22,7 +22,7 @@
 - **原因**：算子没落到 AI Core——常见于自定义 Python/numpy 逻辑、float64 运算、torch_npu 未实现的算子落到 CPU 侧、复杂 host 侧循环、动态 shape 导致无法编译。
 - **修复（只有环境变量/融合算子自动实施，其余列清单）**：
   1. float64 → float32（NPU 对 float64 支持差；RoPE / 位置编码里的 float64 尤其致命）——代码改动，列清单。
-  2. 把热点原语换成 `torch_npu` 融合算子（attention/RMSNorm/RoPE/FFN，见 `fusion-op-catalog.md`）——无侵入自动项。
+  2. 把热点原语换成 `torch_npu` 融合算子（attention/RMSNorm/RoPE/FFN，见 `fusion-op-catalog.md`）——无侵入自动项；先按 P1 模型定义映射定位到具体 `file:line`，并注意融合可能引入舍入误差，必须做精度对比。
   3. 把逐元素 Python 循环改为向量化 torch 操作——代码改动，列清单。
   4. 若某算子确实未实现，考虑自定义算子或换等价表达——有侵入，列清单。
 - **案例**：OpenWAM AICPU ~73.3% → 换融合算子 + float64→float32 后 step 15.79→3.02 s/step。
