@@ -1,0 +1,25 @@
+{
+  "model_name": "",
+  "model_type": "DiT | VAE | world-model | ...",
+  "framework": "",
+  "structure": "text_encoder -> DiT denoise -> VAE decode",
+  "params": {
+    "total": "",
+    "trainable": "",
+    "notes": "统计口径（是否含 text_encoder / VAE）"
+  },
+  "dtype": "bf16 | fp16 | fp32",
+  "input_spec": {
+    "resolution": "",
+    "frames": "",
+    "seq_len": "",
+    "batch": ""
+  },
+  "parallel_strategy": "single-card | DDP | FSDP | TP/SP/CFG/CP ...",
+  "code_version": {
+    "branch": "",
+    "commit": "",
+    "backup_id": "非 git 仓库填写 P0 备份目录"
+  },
+  "notes": "缺失项写 unknown 并注明待确认，不要编造"
+}
