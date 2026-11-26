@@ -5,7 +5,7 @@
 ## 采集口径
 
 - baseline：`prof/baseline/`（P2 采集，P3 O2 之前，`NPU_TUNE_PROBE=0`）
-- final：`prof/final/`（P7.5 采集，`baseline_commit + all.patch` 干净工作区 + 最终环境变量，`NPU_TUNE_PROBE=0`）
+- final：`prof/final/`（P7.5 采集，P7 干净集成分支/工作区（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）+ 最终环境变量，`NPU_TUNE_PROBE=0`）
 - profiler：Level1 + PipeUtilization；rank=`<N>`；warmup=`<N>`；active/denoise steps=`<N>`；输入=`<shape/dtype/batch>`
 
 ## 生效矩阵

@@ -277,7 +277,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 
 P7.5 只证明“优化机制在最终代码中真实生效、瓶颈发生迁移”，不重新分配单项收益；单项收益仍以 P7 的 control vs candidate / `stacked_gain` 为准。
 
-1. **干净路径**：从 `baseline_commit` 新建干净集成分支/工作区，按顺序应用所有已采纳 patch（即 `all.patch`）并加载最终环境变量（`artifacts/env.applied.sh`，若有），确认 `NPU_TUNE_PROBE=0`、无探针/调试代码、无未提交改动。最终 profile 必须来自这条最终交付代码路径，不能来自 B 的开发工作区。
+1. **干净路径**：使用 P7 的干净集成分支/工作区（从 `baseline_commit` 按顺序应用全部已采纳 patch，其内容应与最终 `all.patch` 等价）并加载最终环境变量（`artifacts/env.applied.sh`，若有），确认 `NPU_TUNE_PROBE=0`、无探针/调试代码、无未提交改动。最终 profile 必须来自这条最终交付代码路径，不能来自 B 的开发工作区。
 2. **同口径采集**：按 `prof/baseline/manifest.json` 的 profiler 配置（Level1 + PipeUtilization）、主 rank、warmup、active steps/denoise steps、输入形状/dtype/batch，采集 `prof/final/` 并写自己的 `manifest.json`（同时记录最终环境变量）。带 profiler 的 run **不作为最终性能数字**；最终性能数字仍来自第 2 步的非 profiling 复测。
 3. **对比分析**：用 `scripts/profile_summary.py` 分别汇总 baseline/final，或用 `scripts/profile_compare.py --baseline prof/baseline --final prof/final`，生成 `final_profiling_analysis.md`：step_trace 的 Computing / Communication / Free 占比、Task Type 占比、Top-N kernel/算子、AICPU/CPU fallback、HCCL/memcpy 与关键算子数量变化。
 4. **填写生效矩阵**：按 `assets/optimization-verification-template.md` 写 `optimization_verification.md`。每个已采纳优化点占一行，记录预期 profiling 签名、baseline 证据、final 证据、逐点性能收益、状态（`verified` / `mechanism_verified` / `time_only` / `failed`）和备注。

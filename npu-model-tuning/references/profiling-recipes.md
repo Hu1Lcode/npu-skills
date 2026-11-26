@@ -20,7 +20,7 @@
 
 - `prof/baseline/`：P2 计时基线完成后、P3 O2 环境变量组**之前**采集；原始代码状态，`NPU_TUNE_PROBE=0`。它是最终对照的固定基线，后续 P4 的 profile 不能替代它。
 - `prof/warmstart/`：P3 环境变量组之后、P4 热点分析用的 profile（可选）；它包含 P3 优化，不能当作原始基线。
-- `prof/final/`：P7.5 在 `baseline_commit + all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh`，若有）后采集；`NPU_TUNE_PROBE=0`。
+- `prof/final/`：P7.5 在 P7 的干净集成分支/工作区（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）、加载最终环境变量（`artifacts/env.applied.sh`，若有）后采集；`NPU_TUNE_PROBE=0`。
 - baseline 与 final 必须使用**相同**的 profiler 配置（Level1 + PipeUtilization）、主 rank、warmup、active/denoise steps、输入 shape/dtype/batch；否则只能做趋势参考，不能得出“优化生效”结论。
 - 每份 profile 的 `manifest.json` 必须记录 `purpose`（baseline / warmstart / final）、命令、环境变量、warmup/active 步数、profiler 配置、版本、模型配置、rank、输入规格和时间。
 - profiling run 只用于机制证据，**不作为最终性能数字**。

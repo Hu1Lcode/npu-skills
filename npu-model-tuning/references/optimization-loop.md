@@ -102,7 +102,7 @@
 
 **采集规则**：
 - `prof/baseline/`：P2 完成、P3 O2 环境变量组**之前**采集；原始代码状态（P3 O1 若只是最小跑通接入，可包含在基线内并在 manifest 说明），`NPU_TUNE_PROBE=0`。
-- `prof/final/`：从 `baseline_commit` + `all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）后采集；`NPU_TUNE_PROBE=0`，无调试代码、无未提交改动。
+- `prof/final/`：在 P7 的干净集成分支/工作区（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）、加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）后采集；`NPU_TUNE_PROBE=0`，无调试代码、无未提交改动。
 - baseline/final 必须同 profiler 配置（Level1 + PipeUtilization）、同主 rank、同 warmup、同 active/denoise steps、同输入 shape/dtype/batch；每份 profile 都要有 `manifest.json`，记录环境变量与 purpose。
 - profile 只作为机制证据，**profiling run 不作为最终性能数字**；最终性能仍取 P7 第 2 步的打点关闭复测。
 

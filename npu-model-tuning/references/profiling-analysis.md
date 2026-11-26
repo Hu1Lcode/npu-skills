@@ -276,7 +276,7 @@ P7.5 与 P4 的目标不同：P4 找“当前最慢的点”，P7.5 证明“最
 
 ### 9.1 采集前置检查
 
-- [ ] 工作区来自 `baseline_commit` + `all.patch`，并已加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）；无未提交改动、无调试代码；
+- [ ] 工作区来自 P7 的干净集成分支（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价），并已加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）；无未提交改动、无调试代码；
 - [ ] `NPU_TUNE_PROBE=0`；
 - [ ] `prof/baseline/manifest.json` 与 `prof/final/manifest.json` 的 profiler level、`aic_metrics`、rank、warmup、active/denoise steps、输入 shape/dtype/batch 一致；
 - [ ] 两份 profile 的 `ASCEND_PROFILER_OUTPUT` 都包含必要的 `kernel_details.csv` / `op_statistics.csv`（推理场景按实际产物检查）。
@@ -296,7 +296,7 @@ python scripts/profile_compare.py --baseline prof/baseline --final prof/final --
 
 ## 口径
 - baseline：`prof/baseline/`，采集于 P2、P3 O2 之前
-- final：`prof/final/`，采集于 P7.5，`baseline_commit + all.patch` + 最终环境变量
+- final：`prof/final/`，采集于 P7.5，P7 干净集成分支（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）+ 最终环境变量
 - profiler：Level1 + PipeUtilization；rank=<N>；warmup=<N>；active=<N>；输入=<shape/dtype/batch>
 - 说明：以下为机制证据，不作为最终性能数字
 

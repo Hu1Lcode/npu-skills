@@ -152,7 +152,7 @@ agent/
   "profiles": {
     "baseline": {"dir": "prof/baseline", "manifest": "prof/baseline/manifest.json", "purpose": "P2 pre-P3 baseline"},
     "warmstart": {"dir": "prof/warmstart", "manifest": "prof/warmstart/manifest.json", "optional": true},
-    "final": {"dir": "prof/final", "manifest": "prof/final/manifest.json", "purpose": "P7.5 baseline_commit + all.patch + final env", "same_config_as_baseline": true}
+    "final": {"dir": "prof/final", "manifest": "prof/final/manifest.json", "purpose": "P7.5 P7 integration branch + final env", "same_config_as_baseline": true}
   },
   "tasks": [
     {"id": "001", "owner": "A", "status": "done", "output": "pipeline_breakdown.md"},
@@ -301,7 +301,7 @@ agent/
    }
    ```
    训练场景：去掉 `e2e_ms_*`，改为 3 轮日志 `s_per_step`（含 `jitter_pct`）、`p50_s_per_step`、`p99_s_per_step`、`samples_per_s`（均来自完整训练日志），`stages` 使用单步内 `dataloader / forward / backward / optimizer / zero_grad` 的中位数与占比；精度主判据仍为固定 batch 前向输出的 `cosine ≥ 0.999`，loss/grad norm 辅助记录。训练没有 E2E 时间指标。
-6. **P7.5 最终 profile 采集**：在 `baseline_commit + all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh`）、空闲卡上，按 `prof/baseline/manifest.json` 的 profiler 配置、rank、warmup、active/denoise steps、输入规格采集 `prof/final/`；`NPU_TUNE_PROBE=0`。该 run 只用于机制证据，不作为最终性能数字。写 `prof/final/manifest.json`，并在 handoff 中给出 baseline/final 同口径核对结果。
+6. **P7.5 最终 profile 采集**：在 P7 的干净集成分支/工作区（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）、加载最终环境变量（`artifacts/env.applied.sh`）、空闲卡上，按 `prof/baseline/manifest.json` 的 profiler 配置、rank、warmup、active/denoise steps、输入规格采集 `prof/final/`；`NPU_TUNE_PROBE=0`。该 run 只用于机制证据，不作为最终性能数字。写 `prof/final/manifest.json`，并在 handoff 中给出 baseline/final 同口径核对结果。
 7. 写 `agent/handoff_C.md`：测了什么、原始日志路径、异常、是否达标、final profile 路径与同口径核对。
 
 **不做**：不改优化代码、不调整阈值、不替 B 判断“是否采纳”；patch 应用失败只报告，不自行修；P7.5 不在带未提交改动的开发工作区采集。
@@ -384,10 +384,10 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
    - 记录**单点增量**（相对当前栈）和**累计值**
 4. **交互检查**：如果叠加后收益明显小于各单点收益之和，属于正常（优化可能重叠）；但如果叠加后性能低于基线或低于最佳单点，需回退/二分定位冲突点。
 5. **最终全栈验证**：
-   - `all.patch` 从 `baseline_commit` 干净应用
+   - 从 `baseline_commit` 新建集成分支/worktree 并按顺序应用全部已采纳 patch（内容须与最终 `all.patch` 等价）
    - 完整 smoke + full benchmark + 精度校验（打点关闭）
    - 再跑一遍打点开启的阶段耗时，用于报告中的阶段对比
-   - 确认 `all.patch` 不含任何 `StageTimer` / `NPU_TUNE_PROBE` / 打点代码
+   - 确认集成分支与最终交付 patch 不含任何 `StageTimer` / `NPU_TUNE_PROBE` / 打点代码
 6. **P7.5 最终 profile 复核**：在**同一个干净集成工作区**、加载最终环境变量、空闲卡上，由 C 按 `prof/baseline/manifest.json` 同口径采集 `prof/final/`（probe 关闭）；B 用 `scripts/profile_compare.py` 对比并写 `final_profiling_analysis.md` / `optimization_verification.md`；架构师验收。`failed` 项必须回查/回滚并重新采 `prof/final/`，不能带病进入 P8。
 7. **更新台账**：`optimization_ledger.md` 至少记录两列——`standalone_gain`（并行筛选值）和 `stacked_gain`（集成后增量）；最终报告以 `stacked_gain` 为准。另加 `profiling_status`（`verified` / `mechanism_verified` / `time_only` / `failed`）。
 
@@ -398,7 +398,7 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
 3. **架构师验收**：检查 `result.json` 是否有 control 和 candidate、是否同轮同卡、精度是否真的跑了、patch 是否真的来自 B、最终 `all.patch` 是否不含 probes。
 4. **失败也记录**：`rejected` / `inconclusive` 的候选写入 `optimization_ledger.md`，避免下一个 Agent 重复踩坑。
 5. **数字不一致时**：以 C 的原始日志为准，B 的解释只能作为辅助证据；架构师有权要求重测。
-6. **最终 profile 独立采集**：`prof/final/` 必须由 C 在 `baseline_commit + all.patch` + 最终环境变量的干净工作区、空闲卡上采集，不能在 B 的开发工作区采；baseline/final 的 manifest 必须同口径，否则结论无效。
+6. **最终 profile 独立采集**：`prof/final/` 必须由 C 在 P7 干净集成分支/工作区（`baseline_commit` + 全部已采纳 patch，内容与最终 `all.patch` 等价）+ 最终环境变量的干净工作区、空闲卡上采集，不能在 B 的开发工作区采；baseline/final 的 manifest 必须同口径，否则结论无效。
 
 ## 7. 失败与异常处理
 
