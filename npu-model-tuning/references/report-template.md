@@ -60,6 +60,7 @@
   | 吞吐 samples/s（完整训练日志） | ... |
   | 显存峰值（allocated / reserved，资源观测） | ... |
 - 基线阶段耗时：见第 4 节（与本节基线同一次测量；`baseline.json` 同时保存逐轮值、E2E/s·step 与各阶段）
+- 基线 profiling：`prof/baseline/`（P2 末、P3 O2 之前采集；仅用于 P7.5 同口径对照，不作为性能数字）
 - 原始多次测量值：3 轮逐轮数值与抖动；原始数据见 artifacts/
 
 ## 4. 阶段打点耗时
@@ -138,6 +139,7 @@ flowchart TD
 
   > 推理不报 P50/P99；`dit_step` 为 5 步预热后的单步时间。训练场景：阶段行替换为**单步内**的 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`，P50/P99/吞吐从完整训练日志取；多卡标注 HCCL 阶段。
 - **精度影响**：方法 <输出级 cosine / PSNR/SSIM / 逐层 dump>；结果 <具体数值>；结论 <通过（cosine ≥ 0.999）/ 回滚>
+- **Profiling 复核**：预期签名 <应出现/消失的 kernel、Task Type 或指标变化>；P7.5 `prof/final/` 证据 <实际观察>；状态 <verified / mechanism_verified / time_only / failed>
 - **风险与副作用**：<显存增加 / 数值差异 / 版本依赖 / ...>
 
 ### 优化点 2：<名称>
@@ -174,6 +176,17 @@ flowchart TD
   | 基线 | — | ... |
   | O1 ... | +a% | ... |
   | O2 ... | +b% | ... |
+- **P7.5 最终全栈 Profiling 复核（probe 关闭，baseline/final 同口径）**：
+  - 路径：`prof/baseline/` vs `prof/final/`；final 使用最终环境变量（`artifacts/env.applied.sh`），profiler 配置、rank、warmup、active/denoise steps 与各自 `manifest.json` 一致
+  | 指标 | baseline | final | 变化 |
+  |---|---:|---:|---:|
+  | Computing% | ... | ... | ... |
+  | Communication(Not Overlapped)% | ... | ... | ... |
+  | Free% | ... | ... | ... |
+  | AICPU Task Type 占比 | ... | ... | ... |
+  | Top-1 热点 kernel | ... | ... | ... |
+  - 优化点生效矩阵摘要：`verified` <N> 项、`mechanism_verified` <N> 项、`time_only` <N> 项、`failed` <N> 项；完整矩阵见 `optimization_verification.md`
+  - 说明：profiling run 不作为上方性能数字来源；完整对比见 `final_profiling_analysis.md`
 - 精度/质量结论：<...>
 
 ## 8. 优化后 vs 基线对比
@@ -201,8 +214,10 @@ flowchart TD
 - 结论：<一句话总结>
 - 产物索引：
   - patches：`patches/`（含 `all.patch`）
-  - profiling：`prof/`（manifest.json）
+  - profiling：`prof/baseline/`、`prof/final/`（各自 `manifest.json`；`warmstart/` 可选）
   - profiling 分析：`profiling_analysis.md`
+  - 最终 profiling 对比：`final_profiling_analysis.md`（结构化数据 `artifacts/profile_compare.json`）
+  - 优化点生效矩阵：`optimization_verification.md`
   - 环境信息：`artifacts/env_info.json`
   - 基线数据：`baseline.json`
   - 基线抖动校验：`artifacts/baseline_stats.json`（可选）
@@ -224,5 +239,7 @@ flowchart TD
 - 每个优化点的性能收益是**单点增量**，并注明基于哪个固化状态；推理必须同时给出 E2E、各阶段耗时和 DiT 单步时间，训练必须给出日志 `s/step`、P50/P99、吞吐和单步内阶段拆解，不能只给一个总数。
 - 推理只有时间指标，**禁止写 P50/P99/吞吐**；训练 **禁止写 E2E 任务时间**，P50/P99 必须来自完整训练日志。
 - 精度影响必须写具体数值（主判据 `cosine ≥ 0.999`），不能只写"通过"；`max_abs_diff` 等辅助指标不作为通过门槛。
+- 每个已采纳优化点都必须有 **Profiling 复核**状态（`verified` / `mechanism_verified` / `time_only` / `failed`）；`failed` 项不得写成有效优化，`time_only` 必须给出 P7 同卡成对性能证据。
+- 第 7 节必须给出 P7.5 的 baseline vs final profile 总览和生效矩阵摘要；profiling run 不能用作性能数字，性能数字必须来自同口径非 profiling 复测。
 - 侵入性候选（环境变量与融合算子以外的改动）只列清单，明确写"待用户决策"，按预期收益从高到低排序，不写成已实施。
 - 报告最后一节必须是"优化后 vs 基线对比"；产物索引和复现命令放在该节末尾。

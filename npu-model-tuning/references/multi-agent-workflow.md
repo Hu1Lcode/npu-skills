@@ -26,9 +26,9 @@
 | 角色 | 定位 | 主要职责 | 不做什么 | 关键产出 |
 |---|---|---|---|---|
 | **架构师**（主 Agent） | 项目经理 + 验收人 | 定目标/指标/口径/验收标准；维护 `state.json` 和台账；给 A/B/C 派活；检查每个交付物；升级需要用户拍板的决策；汇总最终报告和 patch | 不深入算子分析、不亲自写优化代码 | `final_report.md`、`optimization_ledger.md`、`invasive_candidates.md`、`patches/`、`agent/state.json` |
-| **小弟 A** | 调用链与基线分析师 | P1 静态调用链拆解；P2 设计打点、生成 `probes.patch`、跑分段基线；输出 `pipeline_breakdown.md` 与 `baseline.json` | 不提优化建议、不改模型逻辑（打点除外） | `pipeline_breakdown.md`、`baseline.json`、`artifacts/probes.patch`、`agent/handoff_A.md` |
-| **小弟 B** | Profiling 分析与优化工程师 | P3/P4 分析 profiling 和基础无侵入手段；P5 形成优化点候选；**实施无侵入 patch（环境变量/融合算子）**；写实验 spec（含验收阈值） | 不自己宣布测试通过（以 C 的数据为准）；不实现侵入性方案（只列清单并按预期收益排序） | `profiling_analysis.md`、`optimization_candidates.json`、`patches/NNN-*.patch`、`agent/handoff_B.md` |
-| **小弟 C** | 独立测试工程师 | 按 B 的 experiment spec 做单点测试：同轮 control vs candidate、同卡同输入、warmup/重复次数、性能 + 精度；保存原始日志和结果 | 不修改优化代码、不调整验收阈值、不替 B 下“是否采纳”的结论 | `artifacts/tests/<opt_id>/result.json`、`run.log`、`precision/`、`agent/handoff_C.md`（结果文件同时供 B 判定和架构师验收） |
+| **小弟 A** | 调用链与基线分析师 | P1 静态调用链拆解；P2 设计打点、生成 `probes.patch`、跑分段基线；P2 末采集 `prof/baseline/` 并写 manifest；输出 `pipeline_breakdown.md` 与 `baseline.json` | 不提优化建议、不改模型逻辑（打点除外） | `pipeline_breakdown.md`、`baseline.json`、`prof/baseline/`、`artifacts/probes.patch`、`agent/handoff_A.md` |
+| **小弟 B** | Profiling 分析与优化工程师 | P3/P4 分析 profiling 和基础无侵入手段；P5 形成优化点候选；**实施无侵入 patch（环境变量/融合算子）**；写实验 spec（含验收阈值）；P7.5 分析 final profile 并填生效矩阵 | 不自己宣布测试通过（以 C 的数据为准）；不实现侵入性方案（只列清单并按预期收益排序） | `profiling_analysis.md`、`optimization_candidates.json`、`patches/NNN-*.patch`、`final_profiling_analysis.md`、`optimization_verification.md`、`agent/handoff_B.md` |
+| **小弟 C** | 独立测试工程师 | 按 B 的 experiment spec 做单点测试：同轮 control vs candidate、同卡同输入、warmup/重复次数、性能 + 精度；P7.5 在干净卡/干净工作区按 manifest 采集 `prof/final/`（含最终环境变量）；保存原始日志和结果 | 不修改优化代码、不调整验收阈值、不替 B 下“是否采纳”的结论 | `artifacts/tests/<opt_id>/result.json`、`run.log`、`precision/`、`prof/final/`、`agent/handoff_C.md`（结果文件同时供 B 判定和架构师验收） |
 
 > **关键**：如果 B 只做分析不做实现，必须增加“小弟 D · 优化实施工程师”，否则流程会断在“谁改代码”。本技能默认 B 兼任实施。
 
@@ -44,6 +44,9 @@ flowchart TD
     ARCH -->|experiment spec + patch + 基线输入| C[C · 单点独立测试]
     C -->|result.json：性能 + 精度 + 原始日志| B
     B -->|B 判定：达标/不达标 + 依据| ARCH
+    ARCH -->|P7.5：干净工作区 + 同口径 manifest| C
+    C -->|prof/final/ 原始数据| B
+    B -->|final_profiling_analysis.md / optimization_verification.md| ARCH
     ARCH -->|记录台账；下一轮 / 最终报告| U
 ```
 
@@ -59,6 +62,7 @@ flowchart TD
 | P5 优化迭代 | B（C 测试） | B 提出并实现无侵入候选（环境变量/融合算子）；C 独立测；B 判定；架构师记录；侵入性候选列清单交用户 |
 | P6 安全实施 | B | 每步 py_compile/import 校验；保留开关 |
 | P7 复测/精度 | C（B 判定） | C 做最终 paired 复测；B 对照预先阈值判定 |
+| P7.5 最终 profiling 复核 | C 采集 + B 分析（架构师验收） | C 在干净工作区、加载最终环境变量后按 `prof/baseline/manifest.json` 同口径采集 `prof/final/`；B 写 `final_profiling_analysis.md` / `optimization_verification.md`；架构师按硬门禁验收 |
 | P8 报告/Patch | 架构师 | 架构师汇总；git 仓库运行 `make_patches.py`，非 git 仓库收集逐点 diff，写报告 |
 
 ## 3. 交接规范（artifact-first）
@@ -145,13 +149,18 @@ agent/
   "baseline_commit": "abc1234",
   "phase": "P5a",
   "current_baseline": {"metric": "e2e_ms", "median": 1234.5, "jitter_pct": 0.9, "file": "baseline.json", "commit": "abc1234"},
+  "profiles": {
+    "baseline": {"dir": "prof/baseline", "manifest": "prof/baseline/manifest.json", "purpose": "P2 pre-P3 baseline"},
+    "warmstart": {"dir": "prof/warmstart", "manifest": "prof/warmstart/manifest.json", "optional": true},
+    "final": {"dir": "prof/final", "manifest": "prof/final/manifest.json", "purpose": "P7.5 baseline_commit + all.patch + final env", "same_config_as_baseline": true}
+  },
   "tasks": [
     {"id": "001", "owner": "A", "status": "done", "output": "pipeline_breakdown.md"},
     {"id": "002", "owner": "B", "status": "in_progress"},
     {"id": "003", "owner": "C", "status": "pending", "depends_on": "002"}
   ],
   "optimizations": [
-    {"id": "O1", "name": "attention backend", "status": "accepted", "perf": "-12.3%", "precision": "cosine 0.9998"}
+    {"id": "O1", "name": "attention backend", "status": "accepted", "perf": "-12.3%", "precision": "cosine 0.9998", "profiling_status": "verified"}
   ],
   "invasive_candidates": {"file": "invasive_candidates.md", "count": 5, "pending_user_decision": 5}
 }
@@ -170,6 +179,7 @@ agent/
 - 按依赖顺序派活；A 先出基线，B 才能分析；B 出实验 spec，C 才能测试。
 - P8：执行 `scripts/experience.py add/update`，把本次的新经验写入对应类别，并回写复用经验的结果。
 - 每次收到交付物先验收：文件存在、数字成对、口径一致、无打点代码进入最终 patch。
+- **P7.5 硬门禁**：核对 `prof/baseline/` 与 `prof/final/` 的 manifest 同口径（配置、rank、warmup、active/denoise steps）；验收 `final_profiling_analysis.md` 和 `optimization_verification.md`，`failed` 项不得进入最终 patch，`time_only` 必须有 P7 同卡成对性能证据。
 - 维护 `state.json` 和 `optimization_ledger.md`；失败实验也要记。
 - 侵入性候选（按预期收益降序）、冲突、精度回归 → 汇总成 `invasive_candidates.md` 决策清单交用户。
 - P8 生成 patch 并写 `final_report.md`：git 仓库运行 `make_patches.py`；非 git 仓库收集 P6 的逐点 `diff -uN` patch 并生成 `all.patch`。
@@ -187,7 +197,8 @@ agent/
 2. 设计打点方案：扩散模型至少覆盖 `prompt_encode` / `image_encode` / `dit_denoise` 总时间 / `dit_step` 单步（5 步预热后）/ `vae_decode`；训练覆盖单步内的 `dataloader` / `forward` / `backward` / `optimizer` / `zero_grad`（若含 text_encoder / VAE / DiT，再按实际模型组件细分）。
 3. 生成 `artifacts/probes.patch`（打点代码只在 patch 里，默认关闭）。
 4. 跑基线与分段计时，产出 `baseline.json`：推理独立跑 **3 次任务**（E2E 抖动 ≤ 10%），固定 10 步左右，含 3 轮原始值、E2E 中位数/抖动、各阶段时间/占比、**DiT 单步时间（5 步预热后）/抖动**；训练独立跑 **3 次任务**（日志 `s/step` 抖动 ≤ 10%），**不报 E2E**，P50/P99/吞吐从完整训练任务日志取，另附单步内各阶段时间/占比。用 `scripts/baseline_stats.py` 校验并记录抖动结论。
-5. 写 `agent/handoff_A.md`：关键发现、最重阶段、计时不确定性、模型定义与调用映射的关键条目、文件路径。
+5. **P2 基线 profile**：在 P3 O2 环境变量组之前，按 P7.5 同口径采集 `prof/baseline/`（`NPU_TUNE_PROBE=0`，Level1 + PipeUtilization，主 rank，同 warmup/active 步数与输入），写 `manifest.json`。这份 profile 只用于最终对照，不作为性能数字。
+6. 写 `agent/handoff_A.md`：关键发现、最重阶段、计时不确定性、模型定义与调用映射的关键条目、baseline/final profile 对照口径和文件路径。
 
 **不做**：不提优化建议；除打点外不改模型逻辑。
 
@@ -240,8 +251,9 @@ agent/
 5. 对 `non_invasive` 候选：实现 patch，保留开关和原实现，`py_compile` 通过后交 C。非 git 仓库按 `SKILL.md` P6 执行：每点动手前把待改文件备份到 `artifacts/backups/<opt_id>/` 并登记 `sha256`，改完立即生成该点 `diff -uN` patch 与 `changes.log`，确保可单点回退。
 6. 对 `invasive_pending_decision`：只写清单，不实现、不排期，由架构师按优先级汇总成决策清单交用户。
 7. 收到 C 的结果后，**按事先写死的阈值**判定：`accepted` / `rejected` / `inconclusive`，并写清依据；不达标就回滚或提出下一个变体。
+8. **P7.5 最终 profiling 分析**：收到 C 采集的 `prof/final/` 后，与 `prof/baseline/` 按相同口径分析（`scripts/profile_compare.py` 或 `profile_summary.py`），写 `final_profiling_analysis.md`，并填 `optimization_verification.md` 的每个已采纳优化点：预期签名、baseline 证据、final 证据、逐点收益、状态。`failed` 项反馈架构师回查/回滚，`time_only` 需引用 C 的 P7 `result.json` 成对数据。
 
-**不做**：不宣布自己实现的东西“通过”，必须等 C 的数据；不修改 C 的测试脚本或阈值。
+**不做**：不宣布自己实现的东西“通过”，必须等 C 的数据；不修改 C 的测试脚本或阈值；不自己采集 `prof/final/`（避免在开发工作区自证）。
 
 ### 4.4 小弟 C · 独立测试工程师
 
@@ -289,9 +301,10 @@ agent/
    }
    ```
    训练场景：去掉 `e2e_ms_*`，改为 3 轮日志 `s_per_step`（含 `jitter_pct`）、`p50_s_per_step`、`p99_s_per_step`、`samples_per_s`（均来自完整训练日志），`stages` 使用单步内 `dataloader / forward / backward / optimizer / zero_grad` 的中位数与占比；精度主判据仍为固定 batch 前向输出的 `cosine ≥ 0.999`，loss/grad norm 辅助记录。训练没有 E2E 时间指标。
-6. 写 `agent/handoff_C.md`：测了什么、原始日志路径、异常、是否达标。
+6. **P7.5 最终 profile 采集**：在 `baseline_commit + all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh`）、空闲卡上，按 `prof/baseline/manifest.json` 的 profiler 配置、rank、warmup、active/denoise steps、输入规格采集 `prof/final/`；`NPU_TUNE_PROBE=0`。该 run 只用于机制证据，不作为最终性能数字。写 `prof/final/manifest.json`，并在 handoff 中给出 baseline/final 同口径核对结果。
+7. 写 `agent/handoff_C.md`：测了什么、原始日志路径、异常、是否达标、final profile 路径与同口径核对。
 
-**不做**：不改优化代码、不调整阈值、不替 B 判断“是否采纳”；patch 应用失败只报告，不自行修。
+**不做**：不改优化代码、不调整阈值、不替 B 判断“是否采纳”；patch 应用失败只报告，不自行修；P7.5 不在带未提交改动的开发工作区采集。
 
 ## 5. 分卡并行测试与集成验证
 
@@ -375,7 +388,8 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
    - 完整 smoke + full benchmark + 精度校验（打点关闭）
    - 再跑一遍打点开启的阶段耗时，用于报告中的阶段对比
    - 确认 `all.patch` 不含任何 `StageTimer` / `NPU_TUNE_PROBE` / 打点代码
-6. **更新台账**：`optimization_ledger.md` 至少记录两列——`standalone_gain`（并行筛选值）和 `stacked_gain`（集成后增量）；最终报告以 `stacked_gain` 为准。
+6. **P7.5 最终 profile 复核**：在**同一个干净集成工作区**、加载最终环境变量、空闲卡上，由 C 按 `prof/baseline/manifest.json` 同口径采集 `prof/final/`（probe 关闭）；B 用 `scripts/profile_compare.py` 对比并写 `final_profiling_analysis.md` / `optimization_verification.md`；架构师验收。`failed` 项必须回查/回滚并重新采 `prof/final/`，不能带病进入 P8。
+7. **更新台账**：`optimization_ledger.md` 至少记录两列——`standalone_gain`（并行筛选值）和 `stacked_gain`（集成后增量）；最终报告以 `stacked_gain` 为准。另加 `profiling_status`（`verified` / `mechanism_verified` / `time_only` / `failed`）。
 
 ## 6. 质量控制（防止自证与移动球门）
 
@@ -384,6 +398,7 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
 3. **架构师验收**：检查 `result.json` 是否有 control 和 candidate、是否同轮同卡、精度是否真的跑了、patch 是否真的来自 B、最终 `all.patch` 是否不含 probes。
 4. **失败也记录**：`rejected` / `inconclusive` 的候选写入 `optimization_ledger.md`，避免下一个 Agent 重复踩坑。
 5. **数字不一致时**：以 C 的原始日志为准，B 的解释只能作为辅助证据；架构师有权要求重测。
+6. **最终 profile 独立采集**：`prof/final/` 必须由 C 在 `baseline_commit + all.patch` + 最终环境变量的干净工作区、空闲卡上采集，不能在 B 的开发工作区采；baseline/final 的 manifest 必须同口径，否则结论无效。
 
 ## 7. 失败与异常处理
 
@@ -393,6 +408,8 @@ python scripts/check_cards.py --devices 0,1,2,3 --json artifacts/tests/<opt_id>/
 | B 的 patch 无法应用 | C 报告给 B 和架构师；B 重做 patch，C 不自行改 |
 | C 测试波动大（> 5%） | 增加重复次数、AB/BA 交替；仍大则判 `inconclusive`，不算通过 |
 | 精度超阈值 | B 回滚或提出改进变体；架构师记录，不写入最终 patch |
+| P7.5 优化点 `failed` | B 回查 patch 命中/环境变量/fallback；确认无效则回滚，C 重新采 `prof/final/`，不得带病出报告 |
+| baseline/final profile 口径不一致 | 作废，重采；检查 manifest 的配置、rank、warmup、active steps、输入规格 |
 | 侵入性候选 | B 只列清单并按预期收益降序；架构师汇总给用户决策 |
 | Agent 结论冲突 | 架构师以文件和原始数据为准，必要时让 C 复测 |
 

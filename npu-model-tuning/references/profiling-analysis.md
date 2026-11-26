@@ -1,6 +1,6 @@
-# P4 · Profiling 深度分析：从 step_trace 到瓶颈结论
+# Profiling 深度分析：从 step_trace 到瓶颈结论（P4 / P7.5）
 
-本文件回答"拿到 profiling 数据后怎么分析"。采集与产物落盘见 `profiling-recipes.md`；本文件负责**分型 → 下钻 → 证据 → 候选方向**的完整链条。
+本文件回答"拿到 profiling 数据后怎么分析"。采集与产物落盘见 `profiling-recipes.md`；P4 负责**分型 → 下钻 → 证据 → 候选方向**，P7.5 负责**baseline vs final 最终全栈复核**（见第 9 节）。
 
 分析顺序固定如下，不要跳步：
 
@@ -269,6 +269,78 @@ MFU = 模型每步理论 FLOPs / (step_time × NPU 峰值 FLOPS × 卡数)
 ```
 
 候选方向必须能回指到本节的具体证据（哪个算子、哪个指标、哪张表），不能只写"感觉 attention 慢"。
+
+## 9. P7.5 最终全栈 Profile 复核
+
+P7.5 与 P4 的目标不同：P4 找“当前最慢的点”，P7.5 证明“最终交付代码里，已采纳的优化机制确实存在，且瓶颈从原来的位置迁移走了”。它不做单项归因——单项收益仍看 P7 的 control vs candidate / stacked_gain。
+
+### 9.1 采集前置检查
+
+- [ ] 工作区来自 `baseline_commit` + `all.patch`，并已加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）；无未提交改动、无调试代码；
+- [ ] `NPU_TUNE_PROBE=0`；
+- [ ] `prof/baseline/manifest.json` 与 `prof/final/manifest.json` 的 profiler level、`aic_metrics`、rank、warmup、active/denoise steps、输入 shape/dtype/batch 一致；
+- [ ] 两份 profile 的 `ASCEND_PROFILER_OUTPUT` 都包含必要的 `kernel_details.csv` / `op_statistics.csv`（推理场景按实际产物检查）。
+
+### 9.2 baseline vs final 总览模板
+
+先运行：
+
+```bash
+python scripts/profile_compare.py --baseline prof/baseline --final prof/final --json artifacts/profile_compare.json
+```
+
+按输出填写 `final_profiling_analysis.md`：
+
+```markdown
+# 最终 Profiling 复核（<日期> / <模型> / <推理|训练>）
+
+## 口径
+- baseline：`prof/baseline/`，采集于 P2、P3 O2 之前
+- final：`prof/final/`，采集于 P7.5，`baseline_commit + all.patch` + 最终环境变量
+- profiler：Level1 + PipeUtilization；rank=<N>；warmup=<N>；active=<N>；输入=<shape/dtype/batch>
+- 说明：以下为机制证据，不作为最终性能数字
+
+## 总览
+| 指标 | baseline | final | 变化 | 解释 |
+|---|---:|---:|---:|---|
+| Computing% | | | | |
+| Communication(Not Overlapped)% | | | | |
+| Free% | | | | |
+| AICPU Task Type 占比 | | | | |
+| AICore / AIV / MIX 占比 | | | | |
+| Top-1 热点 kernel | | | | |
+| kernel 数 / 算子种类数 | | | | |
+
+## 关键变化
+- 新增/增强的融合 kernel：<名称、出现位置、耗时占比>
+- 消失/下降的 kernel：<名称、原耗时占比、对应优化点>
+- Host/Free 变化及解释：
+- 通信/HCCL 变化及解释：
+- AICPU/CPU fallback 变化及解释：
+
+## 优化点生效矩阵摘要
+见 `optimization_verification.md`。摘要：<通过 N 项 / mechanism_verified N 项 / time_only N 项 / failed N 项>
+```
+
+### 9.3 优化点生效矩阵
+
+`optimization_verification.md` 每个已采纳优化点一行，模板见 `assets/optimization-verification-template.md`：
+
+| 优化点 ID | 优化点 | 类别 | 预期 profiling 签名 | baseline 证据 | final 证据 | 逐点性能收益 | 状态 | 备注 |
+|---|---|---|---|---|---|---|---|---|
+| O2 | 环境变量组 | env | Free 下降、kernel 间隔缩短 | Free 28% | Free 18% | E2E -6.2% | verified | |
+| O5 | npu_rms_norm | fusion | `RmsNorm` kernel 消失、`npu_rms_norm` 出现 | 有 `RmsNorm` 12% | 出现 `npu_rms_norm` 9% | DiT 单步 -3.1% | verified | |
+
+### 9.4 状态判定与失败处理
+
+| 状态 | 判定 | 是否可计入“有效优化” |
+|---|---|---|
+| `verified` | 预期 profiling 签名出现，且对应指标改善 | 是 |
+| `mechanism_verified` | 预期签名出现，但整体指标被其他变化掩盖；需结合 P7 成对性能证据 | 是（须注明） |
+| `time_only` | profile 看不出机制差异，但有 P7 同卡 control/candidate 成对性能收益 | 是（仅限有性能证据） |
+| `failed` | 预期签名未出现且无 P7 性能证据；或 patch 未命中/被 fallback | 否，必须回查并回滚 |
+
+失败回查顺序：patch 是否真正应用（`git apply --check` / diff 对照）→ 环境变量是否进入进程（`/proc/<pid>/environ` 或启动日志）→ 是否走了 fallback/其他后端 → 是否被后续优化覆盖 → 仍无效则从最终栈移除并重新采 final profile。
 
 ## 参考来源
 

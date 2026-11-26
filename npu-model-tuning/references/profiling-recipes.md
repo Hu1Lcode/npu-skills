@@ -1,6 +1,6 @@
-# P4 · Profiling 采集配方
+# Profiling 采集配方（P2 基线 / P4 热点 / P7.5 最终复核）
 
-目标：拿到"时间到底花在哪种 task 上"的证据（AICore / AIV / MIX / AICPU / HCCL / memcpy），与 P2 分段耗时互相印证，锁定瓶颈类型。
+目标：拿到"时间到底花在哪种 task 上"的证据（AICore / AIV / MIX / AICPU / HCCL / memcpy），与 P2 分段耗时互相印证，锁定瓶颈类型；同时保证最终 profile 能与基线同口径对照。
 
 > 采集完成后的**深度分析**（step_trace_time 分型、算子透视、Roofline、Hostbound、慢卡检测）见 `profiling-analysis.md`。本文件只负责"怎么采、怎么保证数据可用"。
 
@@ -15,6 +15,15 @@
 - **默认只采主 rank（如 rank 0）**：单卡/单进程场景可用 `ASCEND_RT_VISIBLE_DEVICES` 限定单卡；多进程 DDP/FSDP 只在主 rank 打开 profiler，**不要**把全局 `ASCEND_RT_VISIBLE_DEVICES` 限制为单卡（否则其他 rank 不可见）。多 rank 同时采集会让 trace 体积、磁盘占用和解析时间成倍放大。仅当怀疑快慢卡或通信异常等特殊情况，**由用户确认后**再补采全 rank。
 - **采集后验证产物**：确认输出目录下存在 `*.pt.json` 和 `worker_0_*/trace_*.json`（多进程按 rank 分别检查）；文件为空或缺失视为采集失败，必须先修复再分析。
 - **采集期间关闭 P2 打点**（`NPU_TUNE_PROBE=0`）：`synchronize()` 会制造空泡，污染 Free 占比。
+
+### 基线 / 最终 profile 对照（P2 / P7.5）
+
+- `prof/baseline/`：P2 计时基线完成后、P3 O2 环境变量组**之前**采集；原始代码状态，`NPU_TUNE_PROBE=0`。它是最终对照的固定基线，后续 P4 的 profile 不能替代它。
+- `prof/warmstart/`：P3 环境变量组之后、P4 热点分析用的 profile（可选）；它包含 P3 优化，不能当作原始基线。
+- `prof/final/`：P7.5 在 `baseline_commit + all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh`，若有）后采集；`NPU_TUNE_PROBE=0`。
+- baseline 与 final 必须使用**相同**的 profiler 配置（Level1 + PipeUtilization）、主 rank、warmup、active/denoise steps、输入 shape/dtype/batch；否则只能做趋势参考，不能得出“优化生效”结论。
+- 每份 profile 的 `manifest.json` 必须记录 `purpose`（baseline / warmstart / final）、命令、环境变量、warmup/active 步数、profiler 配置、版本、模型配置、rank、输入规格和时间。
+- profiling run 只用于机制证据，**不作为最终性能数字**。
 
 ### 采集级别选择
 
@@ -44,7 +53,7 @@ with profile(
     activities=[ProfilerActivity.CPU, ProfilerActivity.NPU],
     schedule=schedule(wait=0, warmup=2, active=3, repeat=1),
     experimental_config=exp,
-    on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./perf_reports/20260101/prof"),
+    on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./perf_reports/20260101/prof/warmstart"),
 ) as prof:
     for i in range(WARMUP + ACTIVE):
         run_one_step()      # 推理：run_pipeline()；训练：train_step()
@@ -61,16 +70,22 @@ with profile(
 
 ```text
 perf_reports/<日期>/prof/
-├── <hostname>_<pid>_<ts>_ascend_pt/
-│   ├── ASCEND_PROFILER_OUTPUT/
-│   │   ├── kernel_details.csv      # 逐 kernel：Name / Task Type / Duration(us) / ...
-│   │   ├── op_statistics.csv      # 按算子聚合
+├── baseline/                     # P2 基线（最终对照用）
+│   ├── <hostname>_<pid>_<ts>_ascend_pt/
+│   │   ├── ASCEND_PROFILER_OUTPUT/
+│   │   │   ├── kernel_details.csv      # 逐 kernel：Name / Task Type / Duration(us) / ...
+│   │   │   ├── op_statistics.csv      # 按算子聚合
+│   │   │   └── ...
 │   │   └── ...
+│   └── manifest.json
+├── warmstart/                    # P3 后、P4 分析用（可选）
 │   └── ...
-└── manifest.json                  # 采集命令、warmup/active 步数、profiler 配置、版本、模型与 batch/seq/dtype、时间
+├── final/                        # P7.5 最终全栈
+│   └── ...
+└── manifest.json                 # 如需记录本轮所有 profile 的索引
 ```
 
-`prof/` 目录不得随临时目录清理，报告里给出路径供用户查看。
+每份 profile 自己的 `manifest.json` 记录：purpose、采集命令、warmup/active 步数、profiler 配置、版本、模型与 batch/seq/dtype、rank、时间。`prof/` 目录不得随临时目录清理，报告里给出路径供用户查看。
 
 ## 3. npu-smi 遥测采样
 

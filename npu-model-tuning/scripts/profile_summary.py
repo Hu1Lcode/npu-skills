@@ -161,6 +161,7 @@ def summarize_kernels(path, top):
     return {
         "file": path,
         "total_us": total,
+        "kernel_count": len(body),
         "by_task": sorted(by_task.items(), key=lambda kv: -kv[1]),
         "top_kernels": sorted(by_kernel.items(), key=lambda kv: -kv[1])[:top],
     }
@@ -193,6 +194,8 @@ def summarize_ops(path, top):
     return {
         "file": path,
         "total_us": total,
+        "op_count": len(by_op),
+        "total_count": sum(entry["count"] for entry in by_op.values()),
         "top_ops": sorted(by_op.items(), key=lambda kv: -kv[1]["total_us"])[:top],
     }
 

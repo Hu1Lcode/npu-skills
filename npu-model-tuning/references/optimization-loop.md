@@ -90,11 +90,27 @@
 - 上一轮改动改变了算子下发时序、计算图结构、dtype 或 layout（多流、融合、图模式、量化基本都属于这类）；
 - 现有 profile 与当前代码已对不上，或 reviewer 认为证据不足；
 - 切换到新方向/新热点模块；
-- 终裁某方案或进入最终验收前（最终代码路径必须有一份同口径的最新 profile 与 baseline 对照）。
+- 终裁某方案或进入最终验收前（最终代码路径必须有一份同口径的最新 profile 与 baseline 对照；见下文 P7.5）。
 
 可以不重采：
 - 只动了开关或参数，未改变算子与计算结构，且仍用同一份数据对照；
 - 改动与性能结构无关（纯精度修复、日志等）。
+
+## P7.5 最终全栈 Profile 复核（P8 前硬门禁）
+
+最终验收前，必须证明“所有已采纳优化叠加后的最终代码路径”上机制真实生效、瓶颈按预期迁移，而不是只看单项收益表。
+
+**采集规则**：
+- `prof/baseline/`：P2 完成、P3 O2 环境变量组**之前**采集；原始代码状态（P3 O1 若只是最小跑通接入，可包含在基线内并在 manifest 说明），`NPU_TUNE_PROBE=0`。
+- `prof/final/`：从 `baseline_commit` + `all.patch` 的干净工作区、加载最终环境变量（`artifacts/env.applied.sh` 或 manifest 记录）后采集；`NPU_TUNE_PROBE=0`，无调试代码、无未提交改动。
+- baseline/final 必须同 profiler 配置（Level1 + PipeUtilization）、同主 rank、同 warmup、同 active/denoise steps、同输入 shape/dtype/batch；每份 profile 都要有 `manifest.json`，记录环境变量与 purpose。
+- profile 只作为机制证据，**profiling run 不作为最终性能数字**；最终性能仍取 P7 第 2 步的打点关闭复测。
+
+**判定流程**：
+1. 汇总 baseline/final 的 `step_trace_time.csv`（Computing / Communication / Free）、Task Type 占比、Top-N kernel/算子、AICPU/CPU fallback、HCCL/memcpy 变化，写入 `final_profiling_analysis.md`。
+2. 在 `optimization_verification.md` 为每个已采纳优化点记录：预期 profiling 签名、baseline 证据、final 证据、逐点性能收益、状态。
+3. 状态定义：`verified`（预期签名出现且指标改善）、`mechanism_verified`（预期机制出现但整体指标被其他变化掩盖）、`time_only`（profile 无可见机制，但有 P7 同卡成对性能证据）、`failed`（预期机制未出现且无性能证据）。
+4. **门禁**：`failed` 项不得计入“有效优化”，必须回查并回滚；`time_only` 项必须附 P7 的成对性能证据，不能只凭历史数据。复核结论同步到 `optimization_ledger.md` 和报告第 7 节。
 
 ## 最终验收清单（P8 前）
 
@@ -106,6 +122,8 @@
 - [ ] 基线由 3 次任务采集，推理 E2E / 训练 `s/step` 抖动 ≤ 10%，且 `baseline_stats.json` 有记录；
 - [ ] 精度/功能满足初始口径；
 - [ ] 最终性能与 baseline 同场景、同口径对比（打点关闭）；
+- [ ] `prof/baseline/` 与 `prof/final/` 均存在，manifest 同口径（配置、rank、warmup、active/denoise steps）；
+- [ ] `final_profiling_analysis.md` 与 `optimization_verification.md` 已完成，所有已采纳项无 `failed`，`time_only` 有 P7 成对性能证据；
 - [ ] 确认无法再派生出仍有潜在收益的新候选。
 
 ## 冲突与待决策（一定交人工）
@@ -139,4 +157,9 @@ while not reached_target:
         rollback(cand)
     if conflicting(cand):
         record_decision_item(cand)                       # 交人工
+
+# P7.5：最终全栈复核（P8 前）
+final_profile = collect_and_compare("prof/baseline", "prof/final")  # 同配置、probe 关闭
+write_final_profiling_analysis(final_profile)
+write_optimization_verification_matrix(final_profile)               # failed 项回滚/回查
 ```

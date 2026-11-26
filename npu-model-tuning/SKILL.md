@@ -72,12 +72,18 @@ perf_reports/<YYYYMMDD>/
 │   ├── env.applied.sh           # 已固化环境变量（可选，可 source）
 │   ├── probes.patch             # P2 打点补丁（默认关闭，不进入最终 patch）
 │   ├── baseline_stats.json      # P2 三次基线抖动校验结果（可选）
+│   ├── profile_compare.json     # P7.5 baseline vs final 结构化对比（profile_compare.py 输出）
 │   ├── precision/               # P7 精度对比结果（cosine / PSNR / SSIM / 逐层 dump）
 │   ├── tests/                   # 多 Agent 单点测试：<opt_id>/result.json 与原始日志
 │   └── backups/                 # 非 git 仓库：每个优化点的文件级备份与回退清单
 ├── backup_src/                  # 非 git 仓库：P0 完整代码备份（最终兜底）
-├── prof/                        # torch_npu.profiler 产物（必须持久化）
+├── prof/
+│   ├── baseline/                # P2 基线 profile（P3 环境变量组之前，probe 关闭，最终对照用）
+│   ├── warmstart/               # P3 环境变量后的 profile（P4 热点分析用，可选）
+│   └── final/                   # P7.5 最终全栈 profile（probe 关闭）
 ├── profiling_analysis.md        # P4 profiling 分析结论与候选方向
+├── final_profiling_analysis.md  # P7.5 baseline vs final profile 对比
+├── optimization_verification.md # P7.5 每个已采纳优化点的生效矩阵
 ├── pipeline_breakdown.md        # P1 调用链、模型定义映射与打点位置说明
 ├── baseline.json                # P2 基线数据
 ├── optimization_ledger.md       # 每个优化点的实验台账
@@ -104,10 +110,10 @@ perf_reports/<YYYYMMDD>/
 
 | 角色 | 职责 | 关键产出 |
 |---|---|---|
-| **架构师**（主 Agent） | 项目管理 + 验收 + 用户接口 + 最终报告；不是单纯转发 | `agent/state.json`、`optimization_ledger.md`、`final_report.md`、`patches/` |
-| **小弟 A** | P1 调用链拆解 + P2 分段打点基线 | `pipeline_breakdown.md`、`baseline.json`、`artifacts/probes.patch` |
-| **小弟 B** | P3/P4 Profiling 分析 + P5 优化点分析**与无侵入实现（环境变量/融合算子）** | `profiling_analysis.md`、`optimization_candidates.json`、候选 patch |
-| **小弟 C** | 独立单点测试：同轮 control vs candidate，性能 + 精度 | `artifacts/tests/<opt_id>/result.json`、原始日志 |
+| **架构师**（主 Agent） | 项目管理 + 验收 + 用户接口 + 最终报告；P7.5 硬门禁验收；不是单纯转发 | `agent/state.json`、`optimization_ledger.md`、`final_report.md`、`patches/` |
+| **小弟 A** | P1 调用链拆解 + P2 分段打点基线 + P2 末 `prof/baseline/` | `pipeline_breakdown.md`、`baseline.json`、`prof/baseline/`、`artifacts/probes.patch` |
+| **小弟 B** | P3/P4 Profiling 分析 + P5 优化点分析**与无侵入实现（环境变量/融合算子）** + P7.5 final 分析 | `profiling_analysis.md`、`optimization_candidates.json`、候选 patch、`final_profiling_analysis.md`、`optimization_verification.md` |
+| **小弟 C** | 独立单点测试：同轮 control vs candidate，性能 + 精度；P7.5 `prof/final/` 采集 | `artifacts/tests/<opt_id>/result.json`、`prof/final/`、原始日志 |
 
 用 `Agent` 工具（general-purpose 子代理）启动 A/B/C，prompt 按 `references/multi-agent-workflow.md` 的角色卡组织。交接必须 **artifact-first**：架构师派活时传“关键摘要 + 文件路径 + 输出 schema”，不能只靠自然语言转述。完整角色卡、Context Pack 模板、`state.json` 结构、并行/隔离规则见 `references/multi-agent-workflow.md`。
 
@@ -199,20 +205,21 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
    - 推理：3 轮 E2E 时间与抖动、各阶段时间/占比、DiT 单步时间/抖动（5 步预热后）；**推理只有时间指标，不报 P50/P99/吞吐**。
    - 训练：3 轮日志 `s/step` 与抖动、完整训练任务的 P50/P99/吞吐、单步内各阶段时间/占比；不报 E2E。
    每个优化点的复测结果也要按同样结构记录。
+9. **基线 Profiling（最终对照用，必须）**：P2 计时基线完成后、P3 应用 O2 环境变量组之前，用与 P7.5 完全相同的 profiler 配置、主 rank、warmup、active/denoise steps 和输入，采集 `prof/baseline/` 并写 `manifest.json`；采集时 `NPU_TUNE_PROBE=0`。这份 profile 只作为 P7.5 的对照证据，不作为性能数字。P3 O1 若只是最小跑通接入，可视为基线状态的一部分，但要在 manifest 说明。
 
 ### P3 Warm-start · 基础接入与环境变量  → 读 `references/warmstart-defaults.md`
 
 1. **O1 · torch_npu 接入检查**：若入口尚未导入 `torch_npu` / `transfer_to_npu`，在入口最前面补上（基础接入）。已接入则跳过并记录。
-2. **O2 · 环境变量组**：按场景从 `assets/env.default.sh` 的候选集中选择相关变量，作为一个优化点成组应用、成组测量。不要无脑全开；逐项确认当前 CANN/torch_npu 版本支持。
+2. **O2 · 环境变量组**：按场景从 `assets/env.default.sh` 的候选集中选择相关变量，作为一个优化点成组应用、成组测量。不要无脑全开；逐项确认当前 CANN/torch_npu 版本支持。应用前必须确认 P2 的 `prof/baseline/` 已采集；O2 是第一个性能优化点，P7.5 的 `prof/final/` 需要与这份基线对照。
 3. 运行 `python scripts/scan_fusion_ops.py --detail --json perf_reports/<date>/artifacts/fusion_ops.json`，建立当前机器实际可用的 `npu_*` 算子清单（含 torch_npu 版本、分组、函数签名与首行说明），供 P4/P5 使用。扫描结果只是候选池，不直接全量替换。
 4. 应用后先按 P2 同口径复测一次，记录本组的性能收益（作为一个优化点）。
 5. **融合算子替换不在 P3 盲目执行**：必须等 P4 profiling 定位到热点、并基于 P1 的模型定义映射找到对应 `file:line` 后，再逐个替换、逐个测量性能和精度。融合算子通常能减少下发和访存，但收益大小取决于热点占比；同时可能因 dtype 降级、累加顺序或近似激活引入舍入误差，精度不通过时先尝试精度保持变体，仍不通过就回滚，不能默认全量启用。
 
 ### P4 采集 Profiling + 分析  → 读 `references/profiling-recipes.md`、`references/profiling-analysis.md`
 
-1. `torch_npu.profiler` 包住完整流水线：推理默认只采主 rank（如 rank 0）；扩散模型 profiling 可把 denoise steps 降到 5 步节省时间；训练采 3–5 个 step（实验可用 10 step 级别）。多 rank 仅在有快慢卡/通信异常等特殊情况时，由用户确认后补采全 rank。步数过多会产生 GB 级 trace、解析极慢。
+1. `torch_npu.profiler` 包住完整流水线：推理默认只采主 rank（如 rank 0）；扩散模型 profiling 可把 denoise steps 降到 5 步节省时间；训练采 3–5 个 step（实验可用 10 step 级别）。多 rank 仅在有快慢卡/通信异常等特殊情况时，由用户确认后补采全 rank。步数过多会产生 GB 级 trace、解析极慢。P4 的 profile 保存到 `prof/warmstart/`（若已应用 P3 环境变量）或 `prof/round-<N>/`，它是热点分析用，**不是原始基线**；最终对照统一使用 P2 的 `prof/baseline/`。
 2. 配置 `ProfilerActivity.CPU + NPU`；按版本设置 `_ExperimentalConfig(profiler_level=Level1, aic_metrics=PipeUtilization)`，否则 `kernel_details.csv` 可能缺少关键列。
-3. 产物必须持久化到 `perf_reports/<date>/prof/` 并生成 `manifest.json`（命令、步数、版本、模型配置），路径写进报告。
+3. 产物必须持久化到 `perf_reports/<date>/prof/warmstart/` 或 `prof/round-<N>/` 并生成 `manifest.json`（命令、步数、版本、模型配置、purpose），路径写进报告。
 4. 用 `scripts/npu_monitor.py` 在关键运行期间采样 `npu-smi`（HBM / AICore% / 功耗 / 温度），与 profiler 互证。
 5. 用 `scripts/profile_summary.py` 分析（默认取找到的第一份产物；多 rank 可用 `--rank N` 指定）：
    - `step_trace_time.csv` 的 Computing / Communication / Free 占比与瓶颈分型
@@ -254,7 +261,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 - 每次改动后跑 `python -m py_compile` 或 import 校验；再进入测量。
 - 任何新开关默认值应为"保持原行为"。
 
-### P7 复测 + 精度校验  → 读 `references/precision-validation.md`
+### P7 复测 + 精度校验 + 最终 Profiling 复核  → 读 `references/precision-validation.md`、`references/profiling-recipes.md`、`references/profiling-analysis.md`
 
 1. **集成验证（必须）**：把已采纳的优化点按顺序应用到从 `baseline_commit` 新建的集成分支/工作区；每个 patch 先 `git apply --check`，有冲突退回 B 基于当前栈重做 patch。可用 `scripts/verify_stack.py --repo <repo> --base <commit> --patches <dir>` 在临时 worktree 自动验证，并可带 `--command` 跑 smoke/full。**非 git 仓库**：把 `backup_src/` 复制到临时目录，按顺序 `patch -p1` 应用 `patches/NNN-*.patch`，再跑 smoke/full，结果同样记录到 `stack_verify.json`。逐点集成复测：control = 当前栈（首次为原始基线），candidate = 当前栈 + 本优化点，记录 `standalone_gain`（并行筛选值）与 `stacked_gain`（集成增量）。
 2. 所有已固化优化叠加后，按 P2 的**同一基线口径**复测最终性能：推理独立跑 3 次、固定 10 步左右，报 E2E 时间 + 各阶段时间 + DiT 单步时间（5 步预热后），不报 P50/P99；训练从完整训练日志取 `s/step`、P50、P99、吞吐，单步内各阶段耗时另用打点拆解。权威性能数字用**打点关闭**的数据；阶段对比用**打点开启**的数据，并注明口径差异。
@@ -266,6 +273,16 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 5. 回归检查：关闭所有新开关后，结果应与原始基线一致。
 6. 若使用分卡并行筛选：并行结果只能作为候选筛选，**最终报告数字必须来自串行集成后的全栈复测**；测试前用 `scripts/check_cards.py` 确认卡空闲，同一候选的 control/candidate 必须在同一卡上成对跑。
 
+**P7.5 最终全栈 Profiling 复核（P8 前硬门禁）**
+
+P7.5 只证明“优化机制在最终代码中真实生效、瓶颈发生迁移”，不重新分配单项收益；单项收益仍以 P7 的 control vs candidate / `stacked_gain` 为准。
+
+1. **干净路径**：从 `baseline_commit` 新建干净集成分支/工作区，按顺序应用所有已采纳 patch（即 `all.patch`）并加载最终环境变量（`artifacts/env.applied.sh`，若有），确认 `NPU_TUNE_PROBE=0`、无探针/调试代码、无未提交改动。最终 profile 必须来自这条最终交付代码路径，不能来自 B 的开发工作区。
+2. **同口径采集**：按 `prof/baseline/manifest.json` 的 profiler 配置（Level1 + PipeUtilization）、主 rank、warmup、active steps/denoise steps、输入形状/dtype/batch，采集 `prof/final/` 并写自己的 `manifest.json`（同时记录最终环境变量）。带 profiler 的 run **不作为最终性能数字**；最终性能数字仍来自第 2 步的非 profiling 复测。
+3. **对比分析**：用 `scripts/profile_summary.py` 分别汇总 baseline/final，或用 `scripts/profile_compare.py --baseline prof/baseline --final prof/final`，生成 `final_profiling_analysis.md`：step_trace 的 Computing / Communication / Free 占比、Task Type 占比、Top-N kernel/算子、AICPU/CPU fallback、HCCL/memcpy 与关键算子数量变化。
+4. **填写生效矩阵**：按 `assets/optimization-verification-template.md` 写 `optimization_verification.md`。每个已采纳优化点占一行，记录预期 profiling 签名、baseline 证据、final 证据、逐点性能收益、状态（`verified` / `mechanism_verified` / `time_only` / `failed`）和备注。
+5. **判定门禁**：`failed` 的优化点不得写入“有效优化”，必须回查 patch 是否真正命中、是否被 fallback、是否有环境变量未生效，确认无效后回滚；`time_only` 必须附 P7 同卡成对性能证据（profile 上看不出机制时，不能伪造签名）。所有复核结论同步到 `optimization_ledger.md` 和报告第 7 节。
+
 ### P8 报告 · Patch · 复现  → 读 `references/report-template.md`
 
 1. 生成 patch：git 仓库运行 `scripts/make_patches.py --repo <dir> --base <P0 commit> --output perf_reports/<date>/patches`；脚本按 `opt(N):` commit 生成 `NNN-<名称>.patch`，并生成 `all.patch`。非 git 仓库按 P6 的每点 `diff -uN` 产物收集为 `patches/NNN-<名称>.patch`，`all.patch` 用 P0 完整备份与最终代码的 `diff -ruN` 生成（排除 `perf_reports/`）。生成前确认所有 probe/打点改动已还原，最终代码与 patch 中不得残留 `StageTimer` / `NPU_TUNE_PROBE`。
@@ -275,20 +292,23 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
    3. 调优前基线
    4. 阶段打点耗时
    5. 调用链分析（pipeline 定义 → 各模型定义/调用映射 + Mermaid 流程图，标注打点位置）
-   6. 优化点逐一说明（现象 / 为什么做 / 改动 / 性能收益（推理 E2E + 各阶段 + DiT 单步；训练 s/step + P50/P99 + 吞吐 + 单步内阶段）/ 精度影响 / 风险与回退）
-   7. 优化后性能
+   6. 优化点逐一说明（现象 / 为什么做 / 改动 / 性能收益（推理 E2E + 各阶段 + DiT 单步；训练 s/step + P50/P99 + 吞吐 + 单步内阶段）/ 精度影响 / **Profiling 生效证据** / 风险与回退）
+   7. 优化后性能（含 P7.5 最终全栈 Profiling 复核：baseline vs final 总览 + 优化点生效矩阵摘要）
    8. 优化后 vs 基线对比
 3. **经验沉淀（默认必做）**：从 `optimization_ledger.md` 和最终报告提取新经验，用 `scripts/experience.py add` 写入对应类别；本次复用过的经验用 `experience.py update --result success|failed` 回写结果。只写有实测证据、可复用、已脱敏的条目。
-4. 附产物索引：patch 路径、prof 路径、profiling_analysis.md、baseline.json、artifacts/env_info.json、artifacts/model_info.json、artifacts/fusion_ops.json、optimization_ledger.md、invasive_candidates.md、复现命令。
+4. 附产物索引：patch 路径、`prof/baseline/`、`prof/final/`、`profiling_analysis.md`、`final_profiling_analysis.md`、`optimization_verification.md`、baseline.json、artifacts/profile_compare.json、artifacts/env_info.json、artifacts/model_info.json、artifacts/fusion_ops.json、optimization_ledger.md、invasive_candidates.md、复现命令。
 5. 说明分支位置 / 备份位置，以及如何回退所有改动。
 
 ## 交付前自检
 
-- [ ] `perf_reports/<date>/` 下 `final_report.md`、`patches/`、`baseline.json`、`prof/`、`profiling_analysis.md`、`optimization_ledger.md`、`invasive_candidates.md`、`artifacts/env_info.json`、`artifacts/model_info.json`、`artifacts/fusion_ops.json` 齐全
+- [ ] `perf_reports/<date>/` 下 `final_report.md`、`patches/`、`baseline.json`、`prof/`、`profiling_analysis.md`、`final_profiling_analysis.md`、`optimization_verification.md`、`optimization_ledger.md`、`invasive_candidates.md`、`artifacts/env_info.json`、`artifacts/model_info.json`、`artifacts/fusion_ops.json` 齐全
 - [ ] 报告严格按 8 节顺序，所有性能数字都有基线 vs 优化后的成对数据与口径
+- [ ] `prof/baseline/` 与 `prof/final/` 均存在，两个 `manifest.json` 的 profiler 配置、rank、warmup、active/denoise steps 完全一致，且 profiling run 未用作性能数字
+- [ ] `final_profiling_analysis.md` 有 baseline vs final 的 step_trace、Task Type、Top-N kernel/算子对比
+- [ ] `optimization_verification.md` 覆盖全部已采纳优化点，无 `failed`；`time_only` 均附 P7 同卡成对性能证据
 - [ ] `baseline.json` 含 3 次任务原始值，推理 E2E / 训练日志 `s/step` 抖动 ≤ 10%（见 `artifacts/baseline_stats.json`）
 - [ ] 非 git 仓库：`backup_src/`、`artifacts/backups/`、`artifacts/changes.log` 齐全，每个优化点都能单独回退
-- [ ] 每个优化点有独立 patch、独立性能收益、独立精度结论
+- [ ] 每个优化点有独立 patch、独立性能收益、独立精度结论、独立 Profiling 复核状态
 - [ ] 侵入性优化清单已按预期收益降序排列，未实施项明确标注"待用户决策"
 - [ ] `all.patch` 不含 `StageTimer` / `NPU_TUNE_PROBE` / 打点代码
 - [ ] `pipeline_breakdown.md` 的 Mermaid 图标注了 T1/T2… 打点位置
@@ -306,6 +326,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 - **卡必须干净**：测试前用 `scripts/check_cards.py` 确认目标卡无其他进程；不能只看 HBM（空闲也可能有预留）。
 - **并行只筛选，集成才定稿**：分卡并行只用于候选筛选；最终数字必须来自串行集成后的全栈复测。
 - **逐点归因**：每个优化点单独测量、单独记录性能收益和精度影响；环境变量组作为一组，融合算子逐个。
+- **最终 Profile 必复核**：所有已采纳优化点叠加后，必须在最终代码路径上采 `prof/final/`，与 P2 的 `prof/baseline/` 同口径对比；它证明机制生效和瓶颈迁移，不替代 P7 的逐点收益测试。`failed` 的优化点不能算有效。
 - **无侵入优先**：只自动做环境变量与融合算子两类；其余改动只列清单，按预期收益从高到低交用户决策。
 - **融合算子不是默认全开**：通常有收益但幅度取决于热点占比，且可能引入舍入误差；必须基于 P1 模型定义定位到 `file:line`，逐点测量性能与精度，精度不通过先尝试精度保持变体、仍不通过即回滚。
 - **精度是硬门**：任何优化都要通过精度校验，回归即回滚。
@@ -335,6 +356,7 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 | `scripts/npu_monitor.py` | P4 npu-smi 遥测采样 |
 | `scripts/check_cards.py` | P7/多 Agent 测试前卡空闲门禁与卡分配校验 |
 | `scripts/profile_summary.py` | P4 step_trace / kernel_details / op_statistics（缺失回退 op_summary）汇总与瓶颈分型；`--rank` 指定 rank |
+| `scripts/profile_compare.py` | P7.5 baseline vs final profile 对比：step_trace 占比、Task Type、Top-N 新增/消失 kernel 与算子 |
 | `scripts/scan_fusion_ops.py` | P3 扫描可用 `npu_*` 算子（`--detail` 查看签名与说明） |
 | `scripts/compare_outputs.py` | P7 输出级精度对比 |
 | `scripts/make_patches.py` | P8 按优化 commit 生成 patch |
@@ -344,3 +366,4 @@ python scripts/experience.py update --id <经验id> --result success|failed --no
 | `assets/env.default.sh` | P3 环境变量候选模板 |
 | `assets/invasive-candidates-template.md` | P5b 侵入性优化候选清单模板（按预期收益降序） |
 | `assets/model-info-template.json` | P0 模型信息记录模板 |
+| `assets/optimization-verification-template.md` | P7.5 优化点生效矩阵模板（预期签名 / baseline 证据 / final 证据 / 状态） |
